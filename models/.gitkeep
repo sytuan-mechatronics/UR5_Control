@@ -1,0 +1,4 @@
+# Models directory
+# Place your YOLO model files here:
+#   - phoi.pt (YOLOv8 model trained for phôi detection)
+#   - other.pt (alternative models)
