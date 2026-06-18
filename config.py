@@ -64,6 +64,34 @@ LINEAR_VEL = float(os.getenv("LINEAR_VEL", "0.1"))        # m/s
 PICK_APPROACH_VEL = float(os.getenv("PICK_APPROACH_VEL", "0.05"))  # m/s (slow when approaching)
 
 
+def _parse_vector3(env_key: str, default):
+    """Parse 3 comma-separated floats from environment, else keep default."""
+    value = os.getenv(env_key)
+    if not value:
+        return list(default)
+    try:
+        parts = [float(x.strip()) for x in value.split(",")]
+    except ValueError:
+        return list(default)
+    if len(parts) != 3:
+        return list(default)
+    return parts
+
+
+# Payload/CoG used by external URScript motion commands.
+# Default CoG is an estimate for a long tool assembly and should be refined on robot.
+PAYLOAD_MASS_KG = float(os.getenv("PAYLOAD_MASS_KG", "1.0"))
+PAYLOAD_COG = _parse_vector3("PAYLOAD_COG", [0.0, 0.0, 0.16])
+TCP_OFFSET = [
+    float(os.getenv("TCP_OFFSET_X_M", "-0.00904")),
+    float(os.getenv("TCP_OFFSET_Y_M", "0.00905")),
+    float(os.getenv("TCP_OFFSET_Z_M", "0.3251")),
+    float(os.getenv("TCP_OFFSET_RX_RAD", "0.0185")),
+    float(os.getenv("TCP_OFFSET_RY_RAD", "-0.0294")),
+    float(os.getenv("TCP_OFFSET_RZ_RAD", "3.1303")),
+]
+
+
 # ==================== GEOMETRY & PICKING ====================
 
 PICK_APPROACH_OFFSET_Z = float(os.getenv("PICK_APPROACH_OFFSET_Z", "0.15"))  # m, 150mm above part
@@ -77,6 +105,7 @@ PICK_MAX_APPROACH_LIFT_M = float(os.getenv("PICK_MAX_APPROACH_LIFT_M", "0.03"))
 PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M", "0.005"))
 PICK_MAX_FINAL_Z_ABOVE_SCAN_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_SCAN_M", "0.005"))
 PICK_MIN_DESCENT_M = float(os.getenv("PICK_MIN_DESCENT_M", "0.02"))
+PICK_MIN_FINAL_BELOW_CAMERA_M = float(os.getenv("PICK_MIN_FINAL_BELOW_CAMERA_M", "0.02"))
 
 
 # ==================== GRIPPER ONROBOT RG ====================
@@ -165,6 +194,7 @@ DEPTH_NEAREST_RELAXED_MAX_CENTER_DIST_PX = float(os.getenv("DEPTH_NEAREST_RELAXE
 DEPTH_NEAREST_RELAXED_MAX_SPREAD_MM = float(os.getenv("DEPTH_NEAREST_RELAXED_MAX_SPREAD_MM", "4.0"))
 DEPTH_BBOX_MIN_VALID_RATIO = float(os.getenv("DEPTH_BBOX_MIN_VALID_RATIO", "0.20"))
 DEPTH_BBOX_MAX_SPREAD_MM = float(os.getenv("DEPTH_BBOX_MAX_SPREAD_MM", "25.0"))
+DEPTH_TCP_STANDOFF_CLAMP_ENABLED = os.getenv("DEPTH_TCP_STANDOFF_CLAMP_ENABLED", "False").lower() == "true"
 
 
 # ==================== ROBOT POSE DEFAULTS ====================
@@ -176,14 +206,14 @@ def _load_robot_pose_defaults() -> dict:
     if the JSON is incomplete.
     """
     defaults = {
-        "HOME_JOINTS": [0.000767, -1.030642, -0.524792, -1.877612, 1.575267, 0.000096],
-        "SCAN_APPROACH_JOINTS": [-0.054147, -1.318838, -1.252148, -1.603742, 1.616455, 0.000012],
-        "SCAN_POSE_JOINTS": [-0.036664, -1.458531, -1.774347, -1.063719, 1.527669, 0.000024],
-        "SCAN_POSE_TCP": [0.579045, -0.151577, 0.166318, -1.974726, 2.058398, -0.486919],
-        "PLACE_APPROACH_CART": [-0.190914, 0.523067, 0.250281, -2.764561, -0.780959, 0.108603],
-        "PLACE_POINT_CART": [-0.219838, 0.570151, 0.12614, -2.911071, -0.82381, 0.049533],
-        "PLACE_RETREAT_CART": [-0.190871, 0.523073, 0.250271, -2.764585, -0.780922, 0.108531],
-        "TOOL_DOWN": [-1.974726, 2.058398, -0.486919],
+        "HOME_JOINTS": [-0.095581, -1.485115, -0.124507, -1.549033, 1.607623, 0.000156],
+        "SCAN_APPROACH_JOINTS": [-0.094671, -1.502198, -0.954787, -1.580273, 1.577496, 0.000132],
+        "SCAN_POSE_JOINTS": [-0.0937, -1.589512, -1.398178, -1.480151, 1.575771, 0.00012],
+        "SCAN_POSE_TCP": [0.564878, -0.157992, 0.201213, 2.152263, 1.979381, 0.237215],
+        "PLACE_APPROACH_CART": [0.375507, -0.128532, 0.983618, 1.239429, 1.151906, 1.139757],
+        "PLACE_POINT_CART": [-0.160261, 0.581075, 0.175169, 0.660504, -2.988518, -0.354024],
+        "PLACE_RETREAT_CART": [-0.160284, 0.581084, 0.175159, 0.660485, -2.988496, -0.354011],
+        "TOOL_DOWN": [2.152263, 1.979381, 0.237215],
     }
 
     poses_path = Path(__file__).resolve().parent / "robot_poses.json"

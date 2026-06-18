@@ -80,6 +80,8 @@ def main() -> int:
     try:
         rtde.connect()
         urscript.connect()
+        urscript.set_tcp(config.TCP_OFFSET)
+        print(f"TCP set: offset={config.TCP_OFFSET}")
         urscript.set_payload(config.PAYLOAD_MASS_KG, config.PAYLOAD_COG)
 
         current_joints = rtde.get_joint_positions()

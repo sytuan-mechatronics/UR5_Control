@@ -185,6 +185,31 @@ class URScriptClient:
             one_shot=True,
         )
 
+    def move_joint_to_pose_ik(
+        self,
+        pose: List[float],
+        accel: float = 0.5,
+        vel: float = 0.3,
+    ) -> None:
+        """
+        Move to Cartesian pose using movej(get_inverse_kin(...)).
+
+        This is useful when a straight-line `movel` path is rejected but the
+        target pose itself may still be reachable through joint-space motion.
+
+        Args:
+            pose: [x, y, z, rx, ry, rz] in meters and radians
+            accel: Joint acceleration-like parameter for movej
+            vel: Joint velocity-like parameter for movej
+        """
+        pose_str = ",".join(f"{p:.6f}" for p in pose)
+        logger.info(f"movej(get_inverse_kin) to pose: {pose}")
+        self.send_program(
+            [f"movej(get_inverse_kin(p[{pose_str}]), a={accel}, v={vel})"],
+            program_name="external_movej_ik",
+            one_shot=True,
+        )
+
     def move_linear_offset(
         self,
         current_pose: List[float],

@@ -26,6 +26,7 @@ from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
     build_pick_approach_pose,
+    camera_origin_to_base,
     camera_to_base,
     pixel_to_camera_3d,
     sanitize_camera_depth_mm,
@@ -86,6 +87,18 @@ def _fmt_xyz(values) -> str:
 
 def _fmt_pose(values) -> str:
     return "[" + ", ".join(f"{float(v):.4f}" for v in values) + "]"
+
+
+def pose_position_error_mm(actual_pose, target_pose) -> float:
+    delta = np.array(actual_pose[:3], dtype=np.float64) - np.array(target_pose[:3], dtype=np.float64)
+    return float(np.linalg.norm(delta) * 1000.0)
+
+
+def print_pose_delta(label: str, actual_pose, target_pose) -> None:
+    delta = [actual_pose[i] - target_pose[i] for i in range(6)]
+    err_mm = pose_position_error_mm(actual_pose, target_pose)
+    print(f"{label} actual TCP: {_fmt_pose(actual_pose)}")
+    print(f"{label} delta:      {_fmt_pose(delta)} (pos_err={err_mm:.1f} mm)")
 
 
 def log_target_estimate(
@@ -319,6 +332,12 @@ def parse_args() -> argparse.Namespace:
         help="Pause time in seconds at touch pose",
     )
     parser.add_argument(
+        "--touch-mode",
+        choices=["movel", "movej-ik"],
+        default="movel",
+        help="Motion mode used only for the descend-to-touch step",
+    )
+    parser.add_argument(
         "--scanpose-tol-deg",
         type=float,
         default=3.0,
@@ -343,6 +362,7 @@ def main() -> int:
     print("=== SCANPOSE TOUCH TEST ===")
     print(f"Robot IP: {args.robot_ip}")
     print("Flow: scanpose -> vision -> touch -> return scanpose -> stop")
+    print(f"Touch mode: {args.touch_mode}")
 
     confirm(
         "Robot da dung san o SCAN_POSE, workspace clear, san sang test cham phoi",
@@ -550,10 +570,11 @@ def main() -> int:
             touch_pose=touch_pose,
         )
 
-        if touch_pose[2] >= tcp_pose_at_capture[2]:
+        camera_origin_base = camera_origin_to_base(tcp_pose_at_capture, config.T_CAM_TO_TCP)
+        if touch_pose[2] >= camera_origin_base[2] - config.PICK_MIN_FINAL_BELOW_CAMERA_M:
             print(
-                "Loi: touch pose van nam cao hon TCP tai luc chup "
-                f"({touch_pose[2]:.4f} >= {tcp_pose_at_capture[2]:.4f}). Dung de tranh robot di nguoc."
+                "Loi: touch pose chua nam duoi camera du an toan "
+                f"({touch_pose[2]:.4f} >= {camera_origin_base[2] - config.PICK_MIN_FINAL_BELOW_CAMERA_M:.4f}). Dung de tranh motion sai."
             )
             urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
             wait_steady(rtde, "return_scanpose_upward_guard")
@@ -575,19 +596,34 @@ def main() -> int:
 
         urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
         wait_steady(rtde, "approach")
+        actual_approach_pose, _ = rtde.get_tcp_pose_with_timestamp()
+        print_pose_delta("Approach", actual_approach_pose, approach_pose)
 
         # Move slowly when touching the part surface.
-        urscript.move_linear(touch_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+        if args.touch_mode == "movel":
+            urscript.move_linear(touch_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+        else:
+            urscript.move_joint_to_pose_ik(
+                touch_pose,
+                accel=max(config.LINEAR_ACCEL, 0.2),
+                vel=max(config.PICK_APPROACH_VEL, 0.1),
+            )
         wait_steady(rtde, "touch")
+        actual_touch_pose, _ = rtde.get_tcp_pose_with_timestamp()
+        print_pose_delta("Touch", actual_touch_pose, touch_pose)
 
         if args.hold_s > 0:
             time.sleep(args.hold_s)
 
         urscript.move_linear(retreat_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
         wait_steady(rtde, "retreat")
+        actual_retreat_pose, _ = rtde.get_tcp_pose_with_timestamp()
+        print_pose_delta("Retreat", actual_retreat_pose, retreat_pose)
 
         urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
         wait_steady(rtde, "return_scanpose")
+        actual_return_pose, _ = rtde.get_tcp_pose_with_timestamp()
+        print(f"Return SCAN_POSE actual TCP: {_fmt_pose(actual_return_pose)}")
 
         print("Hoan tat test: da cham phoi va quay lai SCAN_POSE.")
         return 0

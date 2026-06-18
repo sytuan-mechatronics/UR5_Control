@@ -126,6 +126,8 @@ def main() -> int:
     try:
         rtde.connect()
         urscript.connect()
+        urscript.set_tcp(config.TCP_OFFSET)
+        print(f"TCP set: offset={config.TCP_OFFSET}")
         urscript.set_payload(config.PAYLOAD_MASS_KG, config.PAYLOAD_COG)
         print(f"Payload set: mass={config.PAYLOAD_MASS_KG:.3f} kg, cog={config.PAYLOAD_COG}")
 

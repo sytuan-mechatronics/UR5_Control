@@ -18,6 +18,7 @@ from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
     build_pick_approach_pose,
+    camera_origin_to_base,
     camera_to_base,
     sanitize_camera_depth_mm,
     pixel_to_camera_3d,
@@ -73,9 +74,10 @@ class PickPlaceCycle:
         dy = approach_pose[1] - tcp_pose_at_capture[1]
         planar_dist = math.hypot(dx, dy)
         approach_lift = approach_pose[2] - tcp_pose_at_capture[2]
-        final_vs_capture = final_pose[2] - tcp_pose_at_capture[2]
         final_vs_scan = final_pose[2] - config.SCAN_POSE_TCP[2]
         descent_span = approach_pose[2] - final_pose[2]
+        camera_origin_base = camera_origin_to_base(tcp_pose_at_capture, config.T_CAM_TO_TCP)
+        final_below_camera = camera_origin_base[2] - final_pose[2]
 
         if planar_dist > config.PICK_MAX_PLANAR_DELTA_M:
             raise RuntimeError(
@@ -91,18 +93,18 @@ class PickPlaceCycle:
                     config.PICK_MAX_APPROACH_LIFT_M,
                 )
             )
-        if final_vs_capture > config.PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M:
-            raise RuntimeError(
-                "Final pick pose nam cao hon TCP luc chup: dz={:.3f}m > {:.3f}m".format(
-                    final_vs_capture,
-                    config.PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M,
-                )
-            )
         if final_vs_scan > config.PICK_MAX_FINAL_Z_ABOVE_SCAN_M:
             raise RuntimeError(
                 "Final pick pose nam cao hon SCAN_POSE: dz={:.3f}m > {:.3f}m".format(
                     final_vs_scan,
                     config.PICK_MAX_FINAL_Z_ABOVE_SCAN_M,
+                )
+            )
+        if final_below_camera < config.PICK_MIN_FINAL_BELOW_CAMERA_M:
+            raise RuntimeError(
+                "Final pick pose chua nam duoi camera du an toan: clearance={:.3f}m < {:.3f}m".format(
+                    final_below_camera,
+                    config.PICK_MIN_FINAL_BELOW_CAMERA_M,
                 )
             )
         if descent_span < config.PICK_MIN_DESCENT_M:
@@ -115,11 +117,11 @@ class PickPlaceCycle:
 
         self._log(
             "Pick motion validated: planar={:.3f}m, approach_lift={:.3f}m, "
-            "final_vs_capture={:.3f}m, final_vs_scan={:.3f}m, descent={:.3f}m".format(
+            "final_vs_scan={:.3f}m, below_camera={:.3f}m, descent={:.3f}m".format(
                 planar_dist,
                 approach_lift,
-                final_vs_capture,
                 final_vs_scan,
+                final_below_camera,
                 descent_span,
             )
         )
@@ -182,6 +184,18 @@ class PickPlaceCycle:
                 target_class=config.YOLO_TARGET_CLASS,
             )
 
+    def _apply_runtime_tool_settings(self) -> None:
+        """Push payload/CoG settings so external URScript matches pendant assumptions."""
+        self.urscript.set_tcp(config.TCP_OFFSET)
+        self.urscript.set_payload(config.PAYLOAD_MASS_KG, config.PAYLOAD_COG)
+        self._log(
+            "Runtime TCP/payload set: tcp={}, mass={:.3f}kg, cog={}".format(
+                [round(float(v), 4) for v in config.TCP_OFFSET],
+                config.PAYLOAD_MASS_KG,
+                [round(float(v), 4) for v in config.PAYLOAD_COG],
+            )
+        )
+
     def _disconnect_all(self) -> None:
         """No-op for compatibility. Connection lifecycle is managed externally."""
         logger.warning("_disconnect_all() called but lifecycle is externally managed")
@@ -193,6 +207,7 @@ class PickPlaceCycle:
             self.dashboard.precheck_ready()
             self.dashboard.prepare_to_run()
             time.sleep(1.5)  # CB3 brake release settle — URScript dropped if sent too early
+            self._apply_runtime_tool_settings()
             self._check_abort()
 
             self._set_phase("phase1_moving_home")
@@ -263,6 +278,7 @@ class PickPlaceCycle:
             self.dashboard.precheck_ready()
             self.dashboard.prepare_to_run()
             time.sleep(1.5)  # CB3 brake release settle — URScript dropped if sent too early
+            self._apply_runtime_tool_settings()
 
             self._set_phase("phase2_opening_gripper")
             self._gripper_open()
@@ -514,6 +530,7 @@ class PickPlaceCycle:
             self._log("Preparing robot (power on, brake release)...")
             self.dashboard.prepare_to_run()
             time.sleep(1.5)  # CB3 brake release settle — URScript dropped if sent too early
+            self._apply_runtime_tool_settings()
             self._log("Robot ready")
 
             self._log("Opening gripper...")

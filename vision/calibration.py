@@ -7,6 +7,8 @@ import logging
 import numpy as np
 from typing import List, Tuple
 
+import config
+
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,14 @@ def camera_to_base(
     return point_base
 
 
+def camera_origin_to_base(
+    tcp_pose_at_capture: List[float],
+    T_cam_to_tcp: np.ndarray,
+) -> List[float]:
+    """Return camera origin in base frame for the current capture pose."""
+    return camera_to_base([0.0, 0.0, 0.0], tcp_pose_at_capture, T_cam_to_tcp)
+
+
 def min_safe_camera_depth_m(
     T_cam_to_tcp: np.ndarray,
     margin_below_tcp_m: float = 0.02,
@@ -185,6 +195,8 @@ def sanitize_camera_depth_mm(
     Returns:
         (sanitized_depth_mm, was_clamped, min_safe_depth_mm)
     """
+    if not config.DEPTH_TCP_STANDOFF_CLAMP_ENABLED:
+        return depth_mm, False, 0.0
     min_safe_depth_mm = min_safe_camera_depth_m(
         T_cam_to_tcp,
         margin_below_tcp_m=margin_below_tcp_m,
