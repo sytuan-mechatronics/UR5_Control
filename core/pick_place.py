@@ -8,7 +8,7 @@ import logging
 import time
 import traceback
 import math
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import config
 from core.job_store import JobStore
@@ -17,11 +17,12 @@ from robot.dashboard_client import DashboardClient
 from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
-    build_pick_approach_pose,
+    clamp_pick_z_sequence,
     camera_origin_to_base,
     camera_to_base,
-    sanitize_camera_depth_mm,
     pixel_to_camera_3d,
+    resolve_intrinsics_for_frame,
+    sanitize_camera_depth_mm,
 )
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
@@ -185,15 +186,42 @@ class PickPlaceCycle:
             )
 
     def _apply_runtime_tool_settings(self) -> None:
-        """Push payload/CoG settings so external URScript matches pendant assumptions."""
-        self.urscript.set_tcp(config.TCP_OFFSET)
-        self.urscript.set_payload(config.PAYLOAD_MASS_KG, config.PAYLOAD_COG)
+        """DEPRECATED: set_tcp/payload duoc bundle vao tung motion tren CB3."""
         self._log(
-            "Runtime TCP/payload set: tcp={}, mass={:.3f}kg, cog={}".format(
+            "Tool config (bundled vao tung motion): tcp={}, mass={:.3f}kg, cog={}".format(
                 [round(float(v), 4) for v in config.TCP_OFFSET],
                 config.PAYLOAD_MASS_KG,
                 [round(float(v), 4) for v in config.PAYLOAD_COG],
             )
+        )
+
+    def _wait_steady_default(self) -> bool:
+        return self.rtde.wait_steady(
+            timeout_s=config.RTDE_WAIT_TIMEOUT,
+            motion_start_timeout=config.RTDE_MOTION_START_TIMEOUT,
+        )
+
+    def _wait_steady_cleanup(self) -> bool:
+        return self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=10.0)
+
+    def _move_joint_runtime(self, joints: List[float], accel: float, vel: float) -> None:
+        self.urscript.move_joint_with_settings(
+            joints,
+            tcp_offset=config.TCP_OFFSET,
+            payload_kg=config.PAYLOAD_MASS_KG,
+            payload_cog=config.PAYLOAD_COG,
+            accel=accel,
+            vel=vel,
+        )
+
+    def _move_linear_runtime(self, pose: List[float], accel: float, vel: float) -> None:
+        self.urscript.move_linear_with_settings(
+            pose,
+            tcp_offset=config.TCP_OFFSET,
+            payload_kg=config.PAYLOAD_MASS_KG,
+            payload_cog=config.PAYLOAD_COG,
+            accel=accel,
+            vel=vel,
         )
 
     def _disconnect_all(self) -> None:
@@ -211,38 +239,39 @@ class PickPlaceCycle:
             self._check_abort()
 
             self._set_phase("phase1_moving_home")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_moving_scan_approach")
-            self.urscript.move_joint(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_moving_scan_pose")
-            self.urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_moving_place_approach")
-            self.urscript.move_linear(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_moving_place_point")
-            self.urscript.move_linear(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+            time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_moving_place_retreat")
-            self.urscript.move_linear(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase1_returning_home")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
 
             self._set_phase("done")
             self.job_store.update_job(self.job_id, status="done")
@@ -285,18 +314,18 @@ class PickPlaceCycle:
             self._check_abort()
 
             self._set_phase("phase2_moving_home")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase2_moving_scan_approach")
-            self.urscript.move_joint(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase2_moving_scan_pose")
-            self.urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase2_vision_detect")
@@ -327,14 +356,19 @@ class PickPlaceCycle:
                             )
                         )
                 else:
-                    u, v = target.center
-                    depth_mm = self.camera.get_reliable_depth(depth, target.bbox)
+                    target = self.detector.refine_pick_point(rgb, target, depth)
+                    u, v = target.pick_point
+                    depth_mm, depth_bbox = self.detector.resolve_pick_depth(depth, target)
                     self._log(
-                        "Target: label={}, center=({:.1f},{:.1f}), depth={:.1f}mm".format(
+                        "Target: label={}, center=({:.1f},{:.1f}), pick=({:.1f},{:.1f}), depth={:.1f}mm, source={}, depth_bbox={}".format(
                             target.label,
+                            target.center[0],
+                            target.center[1],
                             u,
                             v,
                             depth_mm,
+                            target.pick_source,
+                            depth_bbox,
                         )
                     )
                     if depth_mm > 0:
@@ -352,14 +386,27 @@ class PickPlaceCycle:
                                     min_safe_depth_mm,
                                 )
                             )
-                        p_cam = pixel_to_camera_3d(
-                            u,
-                            v,
-                            depth_mm,
+                        frame_h, frame_w = depth.shape
+                        intr = resolve_intrinsics_for_frame(
+                            frame_w,
+                            frame_h,
                             config.CAM_FX,
                             config.CAM_FY,
                             config.CAM_CX,
                             config.CAM_CY,
+                            config.CAM_CALIB_WIDTH,
+                            config.CAM_CALIB_HEIGHT,
+                        )
+                        if intr["reason"]:
+                            self._log("IntrinsicsWarning: {}".format(intr["reason"]))
+                        p_cam = pixel_to_camera_3d(
+                            u,
+                            v,
+                            depth_mm,
+                            intr["fx"],
+                            intr["fy"],
+                            intr["cx"],
+                            intr["cy"],
                         )
                         ts_diff = abs(cam_ts - rtde_ts)
                         if ts_diff > 0.1:
@@ -367,7 +414,12 @@ class PickPlaceCycle:
                         else:
                             self._log("Timestamp sync OK: delta={:.1f}ms".format(ts_diff * 1000.0))
 
-                        p_base = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+                        p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+                        p_base = [
+                            p_base_raw[0] + config.PICK_OFFSET_X,
+                            p_base_raw[1] + config.PICK_OFFSET_Y,
+                            p_base_raw[2] + config.PICK_OFFSET_Z,
+                        ]
                         self._log(
                             "DepthDebugTarget: {}".format(
                                 json.dumps(
@@ -376,20 +428,40 @@ class PickPlaceCycle:
                                 )
                             )
                         )
-                        approach_pose = build_pick_approach_pose(
-                            p_base,
+                        self._log(
+                            "PickOffset: raw_base={}, offset={}, final_base={}".format(
+                                [round(float(v), 6) for v in p_base_raw],
+                                [
+                                    round(float(config.PICK_OFFSET_X), 6),
+                                    round(float(config.PICK_OFFSET_Y), 6),
+                                    round(float(config.PICK_OFFSET_Z), 6),
+                                ],
+                                [round(float(v), 6) for v in p_base],
+                            )
+                        )
+                        approach_z, final_z, _ = clamp_pick_z_sequence(
+                            tcp_pose_at_capture[2],
+                            p_base[2],
                             config.PICK_APPROACH_OFFSET_Z,
-                            tool_rx=config.TOOL_DOWN_RX,
-                            tool_ry=config.TOOL_DOWN_RY,
-                            tool_rz=config.TOOL_DOWN_RZ,
-                        )
-                        final_pose = build_pick_approach_pose(
-                            p_base,
                             config.PICK_FINAL_OFFSET_Z + config.GRASP_Z_OFFSET,
-                            tool_rx=config.TOOL_DOWN_RX,
-                            tool_ry=config.TOOL_DOWN_RY,
-                            tool_rz=config.TOOL_DOWN_RZ,
+                            config.PICK_RETREAT_OFFSET_Z,
                         )
+                        approach_pose = [
+                            p_base[0],
+                            p_base[1],
+                            approach_z,
+                            config.TOOL_DOWN_RX,
+                            config.TOOL_DOWN_RY,
+                            config.TOOL_DOWN_RZ,
+                        ]
+                        final_pose = [
+                            p_base[0],
+                            p_base[1],
+                            final_z,
+                            config.TOOL_DOWN_RX,
+                            config.TOOL_DOWN_RY,
+                            config.TOOL_DOWN_RZ,
+                        ]
                         self._validate_pick_motion(
                             tcp_pose_at_capture,
                             approach_pose,
@@ -406,8 +478,8 @@ class PickPlaceCycle:
 
             if approach_pose is None or final_pose is None:
                 self._set_phase("phase2_returning_home")
-                self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_default()
                 self._set_phase("done")
                 self.job_store.update_job(self.job_id, status="done", parts_picked=0)
                 return {
@@ -422,41 +494,43 @@ class PickPlaceCycle:
                 }
 
             self._set_phase("phase2_moving_pick_approach")
-            self.urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase2_descending_to_pick")
-            self.urscript.move_linear(final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+            time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
+            self._wait_steady_default()
 
             self._set_phase("phase2_gripping")
             self._gripper_close()
 
             self._set_phase("phase2_retreating_after_pick")
-            self.urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
             self._check_abort()
 
             self._set_phase("phase2_moving_place_approach")
-            self.urscript.move_linear(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
 
             self._set_phase("phase2_descending_to_place")
-            self.urscript.move_linear(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+            time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
+            self._wait_steady_default()
 
             self._set_phase("phase2_releasing")
             self._gripper_open()
             time.sleep(0.3)
 
             self._set_phase("phase2_retreating_after_place")
-            self.urscript.move_linear(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_linear_runtime(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+            self._wait_steady_default()
 
             self._set_phase("phase2_returning_home")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
 
             self._set_phase("done")
             self.job_store.update_job(self.job_id, status="done", parts_picked=1)
@@ -476,8 +550,8 @@ class PickPlaceCycle:
             self._log("Phase 2 aborted: cleanup...")
             try:
                 self._gripper_open()
-                self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_cleanup()
             except Exception as cleanup_err:
                 logger.error("Abort cleanup error: %s", cleanup_err)
             self.job_store.update_job(self.job_id, status="aborted")
@@ -487,8 +561,8 @@ class PickPlaceCycle:
             self._set_phase("error")
             try:
                 self._gripper_open()
-                self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_cleanup()
             except Exception as cleanup_err:
                 logger.error("Error cleanup: %s", cleanup_err)
             self.job_store.update_job(self.job_id, status="error")
@@ -539,20 +613,20 @@ class PickPlaceCycle:
 
             self._set_phase("moving_to_home")
             self._log("Moving to home position...")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._log("At home")
 
             self._set_phase("moving_to_scan_approach")
             self._log("Moving to scan approach position...")
-            self.urscript.move_joint(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._log("At scan approach")
 
             self._set_phase("moving_to_scan_pose")
             self._log("Moving to scan position...")
-            self.urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._log("At scan position")
 
             self._set_phase("initial_scan")
@@ -622,10 +696,11 @@ class PickPlaceCycle:
                     self._log("No valid target with depth, skipping")
                     continue
 
+                target = self.detector.refine_pick_point(rgb, target, depth)
                 self._log("Target selected: {} @ {}".format(target.label, target.bbox))
 
-                u, v = target.center
-                depth_mm = self.camera.get_reliable_depth(depth, target.bbox)
+                u, v = target.pick_point
+                depth_mm, depth_bbox = self.detector.resolve_pick_depth(depth, target)
 
                 if depth_mm <= 0:
                     self._log("No valid depth for target, skipping")
@@ -646,6 +721,17 @@ class PickPlaceCycle:
                         )
                     )
 
+                self._log(
+                    "Target detail: center=({:.1f},{:.1f}), pick=({:.1f},{:.1f}), depth={:.1f}mm, source={}, depth_bbox={}".format(
+                        target.center[0],
+                        target.center[1],
+                        u,
+                        v,
+                        depth_mm,
+                        target.pick_source,
+                        depth_bbox,
+                    )
+                )
                 self._log("Target depth: {:.1f}mm".format(depth_mm))
                 self._log(
                     "DepthDebugTarget: {}".format(
@@ -656,23 +742,61 @@ class PickPlaceCycle:
                     )
                 )
 
-                p_cam = pixel_to_camera_3d(u, v, depth_mm, config.CAM_FX, config.CAM_FY, config.CAM_CX, config.CAM_CY)
-                p_base = camera_to_base(p_cam, self.tcp_pose_at_capture, config.T_CAM_TO_TCP)
+                frame_h, frame_w = depth.shape
+                intr = resolve_intrinsics_for_frame(
+                    frame_w,
+                    frame_h,
+                    config.CAM_FX,
+                    config.CAM_FY,
+                    config.CAM_CX,
+                    config.CAM_CY,
+                    config.CAM_CALIB_WIDTH,
+                    config.CAM_CALIB_HEIGHT,
+                )
+                if intr["reason"]:
+                    self._log("IntrinsicsWarning: {}".format(intr["reason"]))
+                p_cam = pixel_to_camera_3d(u, v, depth_mm, intr["fx"], intr["fy"], intr["cx"], intr["cy"])
+                p_base_raw = camera_to_base(p_cam, self.tcp_pose_at_capture, config.T_CAM_TO_TCP)
+                p_base = [
+                    p_base_raw[0] + config.PICK_OFFSET_X,
+                    p_base_raw[1] + config.PICK_OFFSET_Y,
+                    p_base_raw[2] + config.PICK_OFFSET_Z,
+                ]
+                self._log(
+                    "PickOffset: raw_base={}, offset={}, final_base={}".format(
+                        [round(float(v), 6) for v in p_base_raw],
+                        [
+                            round(float(config.PICK_OFFSET_X), 6),
+                            round(float(config.PICK_OFFSET_Y), 6),
+                            round(float(config.PICK_OFFSET_Z), 6),
+                        ],
+                        [round(float(v), 6) for v in p_base],
+                    )
+                )
 
-                approach_pose = build_pick_approach_pose(
-                    p_base,
+                approach_z, final_z, _ = clamp_pick_z_sequence(
+                    self.tcp_pose_at_capture[2],
+                    p_base[2],
                     config.PICK_APPROACH_OFFSET_Z,
-                    tool_rx=config.TOOL_DOWN_RX,
-                    tool_ry=config.TOOL_DOWN_RY,
-                    tool_rz=config.TOOL_DOWN_RZ,
-                )
-                final_pose = build_pick_approach_pose(
-                    p_base,
                     config.PICK_FINAL_OFFSET_Z + config.GRASP_Z_OFFSET,
-                    tool_rx=config.TOOL_DOWN_RX,
-                    tool_ry=config.TOOL_DOWN_RY,
-                    tool_rz=config.TOOL_DOWN_RZ,
+                    config.PICK_RETREAT_OFFSET_Z,
                 )
+                approach_pose = [
+                    p_base[0],
+                    p_base[1],
+                    approach_z,
+                    config.TOOL_DOWN_RX,
+                    config.TOOL_DOWN_RY,
+                    config.TOOL_DOWN_RZ,
+                ]
+                final_pose = [
+                    p_base[0],
+                    p_base[1],
+                    final_z,
+                    config.TOOL_DOWN_RX,
+                    config.TOOL_DOWN_RY,
+                    config.TOOL_DOWN_RZ,
+                ]
                 self._validate_pick_motion(
                     self.tcp_pose_at_capture,
                     approach_pose,
@@ -690,14 +814,15 @@ class PickPlaceCycle:
 
                     self._set_phase("moving_to_pick_approach_{}_retry_{}".format(pick_attempt, retry))
                     self._log("Moving to pick approach...")
-                    self.urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                    self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                    self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                    self._wait_steady_default()
                     self._log("At pick approach")
 
                     self._set_phase("picking_{}_retry_{}".format(pick_attempt, retry))
                     self._log("Descending to part...")
-                    self.urscript.move_linear(final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
-                    self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                    self._move_linear_runtime(final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+                    time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
+                    self._wait_steady_default()
                     self._log("At part surface")
 
                     self._log("Gripping part...")
@@ -710,8 +835,8 @@ class PickPlaceCycle:
                         self._log("Grip attempt {} failed: {}".format(retry + 1, grip_err))
                         if retry < config.MAX_PICK_RETRIES - 1:
                             self._log("Retreating to retry...")
-                            self.urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                            self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                            self._wait_steady_default()
                             self._gripper_open()
                             time.sleep(0.3)
                         else:
@@ -722,19 +847,20 @@ class PickPlaceCycle:
 
                 self._set_phase("retreating_after_pick_{}".format(pick_attempt))
                 self._log("Retreating with part...")
-                self.urscript.move_linear(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._wait_steady_default()
                 self._log("Part retreated safely")
 
                 self._set_phase("moving_to_place_{}".format(pick_attempt))
                 self._log("Moving to place position...")
-                self.urscript.move_linear(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_linear_runtime(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._wait_steady_default()
                 self._log("At place approach")
 
                 self._log("Descending to conveyor...")
-                self.urscript.move_linear(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_linear_runtime(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+                time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
+                self._wait_steady_default()
                 self._log("At conveyor")
 
                 self._set_phase("placing_{}".format(pick_attempt))
@@ -745,23 +871,23 @@ class PickPlaceCycle:
 
                 self._set_phase("retreating_after_place_{}".format(pick_attempt))
                 self._log("Retreating from conveyor...")
-                self.urscript.move_linear(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_linear_runtime(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._wait_steady_default()
                 self._log("Safe retreat")
 
                 parts_picked += 1
                 self.job_store.update_job(self.job_id, parts_picked=parts_picked)
 
                 self._log("Returning to scan position...")
-                self.urscript.move_joint(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
-                self.urscript.move_joint(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_default()
+                self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_default()
 
             self._set_phase("returning_home")
             self._log("Returning to home...")
-            self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-            self.rtde.wait_steady(timeout_s=config.RTDE_WAIT_TIMEOUT, motion_start_timeout=0.5)
+            self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+            self._wait_steady_default()
             self._log("At home")
 
             self._set_phase("done")
@@ -789,8 +915,8 @@ class PickPlaceCycle:
                 time.sleep(0.3)
 
                 self._log("Aborting: returning to home...")
-                self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_cleanup()
             except Exception as cleanup_err:
                 logger.error("Error during abort cleanup: %s", cleanup_err)
 
@@ -807,8 +933,8 @@ class PickPlaceCycle:
                 logger.info("Attempting cleanup after error...")
                 self._gripper_open()
                 time.sleep(0.3)
-                self.urscript.move_joint(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
-                self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=0.5)
+                self._move_joint_runtime(config.HOME_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._wait_steady_cleanup()
             except Exception as cleanup_err:
                 logger.error("Error during error cleanup: %s", cleanup_err)
 

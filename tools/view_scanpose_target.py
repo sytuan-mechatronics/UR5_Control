@@ -24,7 +24,12 @@ if str(ROOT) not in sys.path:
 
 import config
 from robot.rtde_client import RTDEClient
-from vision.calibration import build_lateral_pre_approach_pose, camera_to_base, pixel_to_camera_3d
+from vision.calibration import (
+    build_lateral_pre_approach_pose,
+    camera_to_base,
+    pixel_to_camera_3d,
+    resolve_intrinsics_for_frame,
+)
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
 from vision.tray_holes import (
@@ -184,14 +189,24 @@ def main() -> int:
         print(f"TCP vs SCAN_POSE pos err: {pose_position_error_mm(tcp_pose_at_capture, config.SCAN_POSE_TCP):.1f} mm")
 
         frame_h, frame_w = depth.shape
-        sx = frame_w / float(config.CAM_CALIB_WIDTH)
-        sy = frame_h / float(config.CAM_CALIB_HEIGHT)
-        fx_eff = config.CAM_FX * sx
-        fy_eff = config.CAM_FY * sy
-        cx_eff = config.CAM_CX * sx
-        cy_eff = config.CAM_CY * sy
+        intr = resolve_intrinsics_for_frame(
+            frame_w,
+            frame_h,
+            config.CAM_FX,
+            config.CAM_FY,
+            config.CAM_CX,
+            config.CAM_CY,
+            config.CAM_CALIB_WIDTH,
+            config.CAM_CALIB_HEIGHT,
+        )
+        fx_eff = intr["fx"]
+        fy_eff = intr["fy"]
+        cx_eff = intr["cx"]
+        cy_eff = intr["cy"]
         print(f"Timestamp delta: {abs(cam_ts - rtde_ts) * 1000.0:.1f} ms")
         print(f"Intrinsics su dung: fx={fx_eff:.2f}, fy={fy_eff:.2f}, cx={cx_eff:.2f}, cy={cy_eff:.2f}")
+        if intr["reason"]:
+            print(f"Canh bao intrinsics: {intr['reason']}")
 
         detections = detector.detect(rgb)
         print(f"Detections: {len(detections)}")

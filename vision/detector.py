@@ -7,6 +7,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Optional
 from pathlib import Path
+import cv2
 
 import config
 
@@ -289,6 +290,95 @@ class Detector:
             float(np.max(valid_depths) - np.min(valid_depths)),
             (roi_x1, roi_y1, roi_x2, roi_y2),
         )
+
+    def _contour_candidates_from_mask(self, mask: np.ndarray, bbox_area: float) -> List[dict]:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < max(20.0, bbox_area * 0.05):
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            if w <= 1 or h <= 1:
+                continue
+            moments = cv2.moments(contour)
+            if abs(moments["m00"]) < 1e-6:
+                continue
+            cx = float(moments["m10"] / moments["m00"])
+            cy = float(moments["m01"] / moments["m00"])
+            perimeter = float(cv2.arcLength(contour, True))
+            circularity = 0.0
+            if perimeter > 1e-6:
+                circularity = float(4.0 * np.pi * area / (perimeter * perimeter))
+            candidates.append(
+                {
+                    "center": [cx, cy],
+                    "bbox": [x, y, x + w, y + h],
+                    "area": area,
+                    "circularity": circularity,
+                    "touches_border": x == 0 or y == 0 or (x + w) >= mask.shape[1] or (y + h) >= mask.shape[0],
+                }
+            )
+        return candidates
+
+    def _find_pick_point_from_contour(
+        self,
+        rgb_image: np.ndarray,
+        bbox: list,
+    ) -> Optional[dict]:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        roi = rgb_image[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        bbox_area = float(max(1, (x2 - x1) * (y2 - y1)))
+        roi_center = np.array([(x2 - x1) / 2.0, (y2 - y1) / 2.0], dtype=np.float32)
+
+        masks = []
+        _, mask_bin = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, mask_inv = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        edge = cv2.Canny(blur, 40, 120)
+        edge = cv2.dilate(edge, np.ones((3, 3), dtype=np.uint8), iterations=1)
+        masks.extend([mask_bin, mask_inv, edge])
+
+        best = None
+        best_score = float("inf")
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        for mask in masks:
+            cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=1)
+            for candidate in self._contour_candidates_from_mask(cleaned, bbox_area):
+                center = np.array(candidate["center"], dtype=np.float32)
+                dist = float(np.linalg.norm(center - roi_center))
+                border_penalty = 25.0 if candidate["touches_border"] else 0.0
+                circularity_penalty = abs(0.9 - min(max(candidate["circularity"], 0.0), 1.2)) * 20.0
+                area_ratio = candidate["area"] / bbox_area
+                area_penalty = abs(0.45 - min(max(area_ratio, 0.05), 0.95)) * 40.0
+                score = dist + border_penalty + circularity_penalty + area_penalty
+                if score < best_score:
+                    best_score = score
+                    best = candidate
+
+        if best is None:
+            return None
+
+        pick_bbox = [
+            int(best["bbox"][0] + x1),
+            int(best["bbox"][1] + y1),
+            int(best["bbox"][2] + x1),
+            int(best["bbox"][3] + y1),
+        ]
+        pick_point = [
+            float(best["center"][0] + x1),
+            float(best["center"][1] + y1),
+        ]
+        return {
+            "pick_point": pick_point,
+            "pick_bbox": pick_bbox,
+            "pick_source": "contour_centroid",
+        }
 
     def detect(self, rgb_image: np.ndarray) -> List[Detection]:
         """
@@ -605,3 +695,94 @@ class Detector:
             logger.warning("No valid target with depth data found")
 
         return best_detection
+
+    def refine_pick_point(
+        self,
+        rgb_image: np.ndarray,
+        target: Detection,
+        depth_array: np.ndarray,
+    ) -> Detection:
+        """
+        Backward-compatible pick-point refinement.
+
+        The current detector does not run an additional geometry refinement pass,
+        so we keep the selected bbox center as the pick point. Older debug tools
+        expect `pick_point`, `pick_bbox`, and `pick_source` attributes to exist.
+        """
+        del depth_array
+
+        refined = self._find_pick_point_from_contour(rgb_image, target.bbox)
+        if refined is None:
+            target.pick_point = [float(target.center[0]), float(target.center[1])]
+            target.pick_bbox = [int(v) for v in target.bbox]
+            target.pick_source = "bbox_center"
+            return target
+
+        target.pick_point = refined["pick_point"]
+        target.pick_bbox = refined["pick_bbox"]
+        target.pick_source = refined["pick_source"]
+        return target
+
+    def resolve_pick_depth(
+        self,
+        depth_array: np.ndarray,
+        target: Detection,
+    ) -> tuple:
+        """
+        Resolve depth for the selected pick point from the depth ROI chosen during
+        `select_best_target()`.
+
+        Returns:
+            (depth_mm, depth_bbox)
+        """
+        frame_h, frame_w = depth_array.shape
+        pick_bbox = [int(v) for v in getattr(target, "pick_bbox", target.bbox)]
+        pick_inner_depth, pick_inner_ratio, pick_inner_spread, pick_inner_bounds = self._extract_inner_roi_depth(
+            depth_array,
+            pick_bbox,
+            frame_w,
+            frame_h,
+        )
+        if (
+            pick_inner_depth > 0
+            and pick_inner_ratio >= config.DEPTH_INNER_RELAXED_MIN_VALID_RATIO
+            and pick_inner_spread <= config.DEPTH_INNER_MAX_SPREAD_MM
+        ):
+            target.pick_source = f"{getattr(target, 'pick_source', 'pick')}_inner_depth"
+            target.pick_bbox = [int(v) for v in pick_inner_bounds]
+            return float(pick_inner_depth), pick_inner_bounds
+
+        depth_debug = getattr(target, "depth_debug", {}) or {}
+        depth_source = depth_debug.get("depth_source", "none")
+
+        roi_map = {
+            "inner": ("inner_roi", "inner_median_depth_mm"),
+            "inner_relaxed": ("inner_roi", "inner_median_depth_mm"),
+            "nearest": ("nearest_roi", "nearest_median_depth_mm"),
+            "nearest_relaxed": ("nearest_roi", "nearest_median_depth_mm"),
+            "bbox": ("bbox_roi", "bbox_median_depth_mm"),
+        }
+        roi_key, depth_key = roi_map.get(depth_source, ("micro_roi", "micro_median_depth_mm"))
+        depth_bbox = depth_debug.get(roi_key)
+        depth_mm = float(depth_debug.get(depth_key, 0.0) or 0.0)
+
+        if depth_mm > 0 and depth_bbox is not None:
+            target.pick_bbox = [int(v) for v in depth_bbox]
+            if not hasattr(target, "pick_point"):
+                target.pick_point = [float(target.center[0]), float(target.center[1])]
+            if not hasattr(target, "pick_source"):
+                target.pick_source = depth_source or "bbox_center"
+            return depth_mm, depth_bbox
+
+        bbox_depth, _, _, bbox_bounds = self._extract_bbox_depth(
+            depth_array,
+            target.bbox,
+            frame_w,
+            frame_h,
+        )
+        if not hasattr(target, "pick_point"):
+            target.pick_point = [float(target.center[0]), float(target.center[1])]
+        target.pick_bbox = [int(v) for v in (bbox_bounds or target.bbox)]
+        if not hasattr(target, "pick_source"):
+            target.pick_source = "bbox_center_fallback"
+        return float(bbox_depth), bbox_bounds

@@ -185,6 +185,41 @@ class URScriptClient:
             one_shot=True,
         )
 
+    def move_linear_with_settings(
+        self,
+        pose: List[float],
+        tcp_offset: List[float],
+        payload_kg: float,
+        payload_cog: List[float],
+        accel: float = 0.3,
+        vel: float = 0.1,
+    ) -> None:
+        """
+        Move movel trong cung program voi set_tcp va set_payload.
+
+        Args:
+            pose: [x, y, z, rx, ry, rz] in meters and radians
+            tcp_offset: [x, y, z, rx, ry, rz] TCP offset
+            payload_kg: Payload mass in kg
+            payload_cog: [x, y, z] center of gravity
+            accel: Acceleration in m/s²
+            vel: Velocity in m/s
+        """
+        tcp_str = ",".join(f"{v:.6f}" for v in tcp_offset)
+        cog_str = ",".join(f"{v:.6f}" for v in payload_cog)
+        pose_str = ",".join(f"{p:.6f}" for p in pose)
+
+        logger.info(f"move_linear_with_settings to pose: {pose}")
+        self.send_program(
+            [
+                f"set_tcp(p[{tcp_str}])",
+                f"set_payload({payload_kg:.4f}, [{cog_str}])",
+                f"movel(p[{pose_str}], a={accel}, v={vel})",
+            ],
+            program_name="external_movel_full",
+            one_shot=True,
+        )
+
     def move_joint_to_pose_ik(
         self,
         pose: List[float],
@@ -207,6 +242,41 @@ class URScriptClient:
         self.send_program(
             [f"movej(get_inverse_kin(p[{pose_str}]), a={accel}, v={vel})"],
             program_name="external_movej_ik",
+            one_shot=True,
+        )
+
+    def move_joint_with_settings(
+        self,
+        joints: List[float],
+        tcp_offset: List[float],
+        payload_kg: float,
+        payload_cog: List[float],
+        accel: float = 1.0,
+        vel: float = 0.8,
+    ) -> None:
+        """
+        Move movej trong cung program voi set_tcp va set_payload.
+
+        Args:
+            joints: [j1, j2, j3, j4, j5, j6] in radians
+            tcp_offset: [x, y, z, rx, ry, rz] TCP offset
+            payload_kg: Payload mass in kg
+            payload_cog: [x, y, z] center of gravity
+            accel: Acceleration in rad/s²
+            vel: Velocity in rad/s
+        """
+        tcp_str = ",".join(f"{v:.6f}" for v in tcp_offset)
+        cog_str = ",".join(f"{v:.6f}" for v in payload_cog)
+        joints_str = ",".join(f"{j:.6f}" for j in joints)
+
+        logger.info(f"move_joint_with_settings to joints: {joints}")
+        self.send_program(
+            [
+                f"set_tcp(p[{tcp_str}])",
+                f"set_payload({payload_kg:.4f}, [{cog_str}])",
+                f"movej([{joints_str}], a={accel}, v={vel})",
+            ],
+            program_name="external_movej_full",
             one_shot=True,
         )
 

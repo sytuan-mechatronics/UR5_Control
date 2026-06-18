@@ -5,7 +5,7 @@ Converts pixel coordinates to robot base frame using hand-eye calibration.
 
 import logging
 import numpy as np
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import config
 
@@ -43,6 +43,63 @@ def pixel_to_camera_3d(
     logger.debug(f"Pixel ({u:.0f}, {v:.0f}) @ {depth_mm:.1f}mm -> 3D ({x_cam:.4f}, {y_cam:.4f}, {z_cam:.4f})m")
     
     return [x_cam, y_cam, z_cam]
+
+
+def resolve_intrinsics_for_frame(
+    frame_w: int,
+    frame_h: int,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    calib_w: float,
+    calib_h: float,
+) -> Dict[str, float]:
+    """
+    Scale camera intrinsics to the current frame size, while protecting against
+    stale calibration width/height metadata.
+    """
+    sx = frame_w / float(calib_w)
+    sy = frame_h / float(calib_h)
+
+    fx_scaled = fx * sx
+    fy_scaled = fy * sy
+    cx_scaled = cx * sx
+    cy_scaled = cy * sy
+
+    frame_cx = frame_w / 2.0
+    frame_cy = frame_h / 2.0
+    raw_center_err = abs(cx - frame_cx) + abs(cy - frame_cy)
+    scaled_center_err = abs(cx_scaled - frame_cx) + abs(cy_scaled - frame_cy)
+
+    if (
+        (abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3)
+        and raw_center_err + 5.0 < scaled_center_err
+    ):
+        return {
+            "fx": fx,
+            "fy": fy,
+            "cx": cx,
+            "cy": cy,
+            "sx": sx,
+            "sy": sy,
+            "used_scale": False,
+            "reason": (
+                "Metadata baseline intrinsics co ve da stale: "
+                "cx/cy goc da hop ly hon so voi tam frame hien tai, nen bo qua auto-scale."
+            ),
+        }
+
+    return {
+        "fx": fx_scaled,
+        "fy": fy_scaled,
+        "cx": cx_scaled,
+        "cy": cy_scaled,
+        "sx": sx,
+        "sy": sy,
+        "used_scale": abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3,
+        "reason": "",
+    }
 
 
 def axis_angle_to_rotation_matrix(
@@ -236,6 +293,49 @@ def build_pick_approach_pose(
     logger.debug(f"Pick approach pose: {pose}")
     
     return pose
+
+
+def clamp_pick_z_sequence(
+    scan_z: float,
+    point_z: float,
+    approach_offset_z: float,
+    touch_offset_z: float,
+    retreat_offset_z: float,
+    min_descent_mm: float = 5.0,
+) -> Tuple[float, float, float]:
+    """
+    Clamp Z sequence so the robot does not rise above the current scan height
+    before moving toward the target.
+    """
+    min_descent_m = min_descent_mm / 1000.0
+    max_working_z = scan_z - min_descent_m
+    touch_z = point_z + touch_offset_z
+    approach_z = min(point_z + approach_offset_z, max_working_z)
+    retreat_z = min(point_z + retreat_offset_z, max_working_z)
+    return approach_z, touch_z, retreat_z
+
+
+def build_lateral_pre_approach_pose(
+    point_base: List[float],
+    tcp_pose_at_capture: List[float],
+    approach_offset_z: float,
+    tool_rx: float = -2.04842,
+    tool_ry: float = -2.026713,
+    tool_rz: float = 0.31989,
+) -> List[float]:
+    """
+    Build a pre-approach pose that keeps the current scan height while moving
+    laterally above the target XY.
+    """
+    del approach_offset_z
+    return [
+        point_base[0],
+        point_base[1],
+        tcp_pose_at_capture[2],
+        tool_rx,
+        tool_ry,
+        tool_rz,
+    ]
 
 
 def estimate_gripper_opening_width(

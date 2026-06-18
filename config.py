@@ -82,10 +82,12 @@ def _parse_vector3(env_key: str, default):
 # Default CoG is an estimate for a long tool assembly and should be refined on robot.
 PAYLOAD_MASS_KG = float(os.getenv("PAYLOAD_MASS_KG", "1.0"))
 PAYLOAD_COG = _parse_vector3("PAYLOAD_COG", [0.0, 0.0, 0.16])
+SKIP_SET_TCP = os.getenv("SKIP_SET_TCP", "False").lower() == "true"
+SKIP_SET_PAYLOAD = os.getenv("SKIP_SET_PAYLOAD", "False").lower() == "true"
 TCP_OFFSET = [
-    float(os.getenv("TCP_OFFSET_X_M", "-0.00904")),
-    float(os.getenv("TCP_OFFSET_Y_M", "0.00905")),
-    float(os.getenv("TCP_OFFSET_Z_M", "0.3251")),
+    float(os.getenv("TCP_OFFSET_X_M", "-0.00115")),
+    float(os.getenv("TCP_OFFSET_Y_M", "0.00987")),
+    float(os.getenv("TCP_OFFSET_Z_M", "0.31535")),
     float(os.getenv("TCP_OFFSET_RX_RAD", "0.0185")),
     float(os.getenv("TCP_OFFSET_RY_RAD", "-0.0294")),
     float(os.getenv("TCP_OFFSET_RZ_RAD", "3.1303")),
@@ -106,6 +108,9 @@ PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_CAPTU
 PICK_MAX_FINAL_Z_ABOVE_SCAN_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_SCAN_M", "0.005"))
 PICK_MIN_DESCENT_M = float(os.getenv("PICK_MIN_DESCENT_M", "0.02"))
 PICK_MIN_FINAL_BELOW_CAMERA_M = float(os.getenv("PICK_MIN_FINAL_BELOW_CAMERA_M", "0.02"))
+PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.0"))
+PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "-0.02"))
+PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "0.0"))
 
 
 # ==================== GRIPPER ONROBOT RG ====================
@@ -477,8 +482,9 @@ RTDE_STEADY_THRESHOLD = float(os.getenv("RTDE_STEADY_THRESHOLD", "0.001"))  # ra
 RTDE_WAIT_TIMEOUT = float(os.getenv("RTDE_WAIT_TIMEOUT", "30.0"))  # s
 # Timeout đợi robot bắt đầu di chuyển sau khi gửi lệnh
 # CB-series có độ trễ ~0.1-0.5s trước khi joint_speed > 0
-RTDE_MOTION_START_TIMEOUT = float(os.getenv("RTDE_MOTION_START_TIMEOUT", "2.0"))  # s
+RTDE_MOTION_START_TIMEOUT = float(os.getenv("RTDE_MOTION_START_TIMEOUT", "3.0"))  # s
 RTDE_MOTION_START_THRESHOLD = float(os.getenv("RTDE_MOTION_START_THRESHOLD", "0.005"))  # rad/s
+CB3_MOTION_PRE_WAIT_SLEEP_S = float(os.getenv("CB3_MOTION_PRE_WAIT_SLEEP_S", "0.5"))  # s
 
 SOCKET_TIMEOUT = float(os.getenv("SOCKET_TIMEOUT", "5.0"))  # s
 URSCRIPT_TIMEOUT = float(os.getenv("URSCRIPT_TIMEOUT", "10.0"))  # s

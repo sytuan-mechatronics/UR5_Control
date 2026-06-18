@@ -22,6 +22,7 @@ from vision.calibration import (
     axis_angle_to_rotation_matrix,
     camera_to_base,
     pixel_to_camera_3d,
+    resolve_intrinsics_for_frame,
 )
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
@@ -67,6 +68,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    tray_ref_enabled = bool(getattr(config, "TRAY_REF_ENABLED", False))
+    tray_ref_inner_corners = getattr(config, "TRAY_REF_INNER_CORNERS", (6, 9))
+    tray_ref_square_size_m = float(getattr(config, "TRAY_REF_SQUARE_SIZE_M", 0.02))
+    pick_offset_x = float(getattr(config, "PICK_OFFSET_X", 0.0))
+    pick_offset_y = float(getattr(config, "PICK_OFFSET_Y", 0.0))
+    pick_offset_z = float(getattr(config, "PICK_OFFSET_Z", 0.0))
 
     print("=== INSPECT TARGET TRANSFORM ===")
     print(f"Robot IP: {args.robot_ip}")
@@ -101,16 +108,26 @@ def main() -> int:
         print(f"Frame/pose delta: {abs(cam_ts - rtde_ts) * 1000.0:.1f} ms")
 
         frame_h, frame_w = depth.shape
-        sx = frame_w / float(config.CAM_CALIB_WIDTH)
-        sy = frame_h / float(config.CAM_CALIB_HEIGHT)
-        fx_eff = config.CAM_FX * sx
-        fy_eff = config.CAM_FY * sy
-        cx_eff = config.CAM_CX * sx
-        cy_eff = config.CAM_CY * sy
+        intr = resolve_intrinsics_for_frame(
+            frame_w,
+            frame_h,
+            config.CAM_FX,
+            config.CAM_FY,
+            config.CAM_CX,
+            config.CAM_CY,
+            config.CAM_CALIB_WIDTH,
+            config.CAM_CALIB_HEIGHT,
+        )
+        fx_eff = intr["fx"]
+        fy_eff = intr["fy"]
+        cx_eff = intr["cx"]
+        cy_eff = intr["cy"]
         print(
             f"Intrinsics used: fx={fx_eff:.2f}, fy={fy_eff:.2f}, "
             f"cx={cx_eff:.2f}, cy={cy_eff:.2f}"
         )
+        if intr["reason"]:
+            print(f"Canh bao intrinsics: {intr['reason']}")
 
         detections = detector.detect(rgb)
         print(f"Detections: {len(detections)}")
@@ -148,7 +165,7 @@ def main() -> int:
         )
         p_base = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
         xy_source = "depth_only"
-        if config.TRAY_REF_ENABLED:
+        if tray_ref_enabled:
             p_base, xy_source = refine_base_xy_with_checkerboard(
                 rgb,
                 u,
@@ -160,20 +177,20 @@ def main() -> int:
                 fy_eff,
                 cx_eff,
                 cy_eff,
-                config.TRAY_REF_INNER_CORNERS,
-                config.TRAY_REF_SQUARE_SIZE_M,
+                tray_ref_inner_corners,
+                tray_ref_square_size_m,
             )
         p_base = [
-            p_base[0] + config.PICK_OFFSET_X,
-            p_base[1] + config.PICK_OFFSET_Y,
-            p_base[2] + config.PICK_OFFSET_Z,
+            p_base[0] + pick_offset_x,
+            p_base[1] + pick_offset_y,
+            p_base[2] + pick_offset_z,
         ]
         camera_origin_base = camera_to_base([0.0, 0.0, 0.0], tcp_pose_at_capture, config.T_CAM_TO_TCP)
 
         print(f"p_cam(m): {[round(vv, 4) for vv in p_cam]}")
         print(f"camera_origin_base(m): {[round(vv, 4) for vv in camera_origin_base]}")
         print(f"p_base(m): {[round(vv, 4) for vv in p_base]}")
-        print(f"pick_offset_base(m): {[round(config.PICK_OFFSET_X, 4), round(config.PICK_OFFSET_Y, 4), round(config.PICK_OFFSET_Z, 4)]}")
+        print(f"pick_offset_base(m): {[round(pick_offset_x, 4), round(pick_offset_y, 4), round(pick_offset_z, 4)]}")
         print(f"xy_source: {xy_source}")
 
         delta_base = np.array(p_base) - np.array(tcp_pose_at_capture[:3])

@@ -26,9 +26,11 @@ from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
     build_pick_approach_pose,
+    clamp_pick_z_sequence,
     camera_origin_to_base,
     camera_to_base,
     pixel_to_camera_3d,
+    resolve_intrinsics_for_frame,
     sanitize_camera_depth_mm,
 )
 from vision.detector import Detector
@@ -133,53 +135,6 @@ def log_target_estimate(
         "touch_pose_m_rad": [round(float(v), 6) for v in touch_pose],
     }
     print(f"Target 3D estimate: {json.dumps(payload, ensure_ascii=True)}")
-
-
-def resolve_intrinsics_for_frame(frame_w: int, frame_h: int):
-    sx = frame_w / float(config.CAM_CALIB_WIDTH)
-    sy = frame_h / float(config.CAM_CALIB_HEIGHT)
-
-    fx_scaled = config.CAM_FX * sx
-    fy_scaled = config.CAM_FY * sy
-    cx_scaled = config.CAM_CX * sx
-    cy_scaled = config.CAM_CY * sy
-
-    frame_cx = frame_w / 2.0
-    frame_cy = frame_h / 2.0
-    raw_center_err = abs(config.CAM_CX - frame_cx) + abs(config.CAM_CY - frame_cy)
-    scaled_center_err = abs(cx_scaled - frame_cx) + abs(cy_scaled - frame_cy)
-
-    # Protect against stale width/height metadata in camera_intrinsics.json.
-    # If raw intrinsics already align with the current frame center much better
-    # than the scaled version, trust the raw values and flag metadata mismatch.
-    if (
-        (abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3)
-        and raw_center_err + 5.0 < scaled_center_err
-    ):
-        return {
-            "fx": config.CAM_FX,
-            "fy": config.CAM_FY,
-            "cx": config.CAM_CX,
-            "cy": config.CAM_CY,
-            "sx": sx,
-            "sy": sy,
-            "used_scale": False,
-            "reason": (
-                "Metadata baseline intrinsics co ve da stale: "
-                "cx/cy goc da hop ly hon so voi tam frame hien tai, nen bo qua auto-scale."
-            ),
-        }
-
-    return {
-        "fx": fx_scaled,
-        "fy": fy_scaled,
-        "cx": cx_scaled,
-        "cy": cy_scaled,
-        "sx": sx,
-        "sy": sy,
-        "used_scale": abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3,
-        "reason": "",
-    }
 
 
 def build_preview_image(
@@ -333,9 +288,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--touch-mode",
-        choices=["movel", "movej-ik"],
-        default="movel",
+        choices=["movel", "movej-ik", "movel-bundled"],
+        default="movel-bundled",
         help="Motion mode used only for the descend-to-touch step",
+    )
+    parser.add_argument(
+        "--skip-set-payload",
+        action="store_true",
+        help="Bo qua set_payload() de test anh huong cua payload/CoG sai",
+    )
+    parser.add_argument(
+        "--skip-set-tcp",
+        action="store_true",
+        help="Bo qua set_tcp() de test anh huong cua TCP runtime conflict",
+    )
+    parser.add_argument(
+        "--motion-start-timeout",
+        type=float,
+        default=None,
+        help="Override RTDE_MOTION_START_TIMEOUT (s). Default: dung config.",
+    )
+    parser.add_argument(
+        "--pre-wait-sleep",
+        type=float,
+        default=None,
+        help="Sleep (s) truoc wait_steady sau touch command. Default: dung config.",
     )
     parser.add_argument(
         "--scanpose-tol-deg",
@@ -363,6 +340,18 @@ def main() -> int:
     print(f"Robot IP: {args.robot_ip}")
     print("Flow: scanpose -> vision -> touch -> return scanpose -> stop")
     print(f"Touch mode: {args.touch_mode}")
+    motion_start_timeout = (
+        args.motion_start_timeout
+        if args.motion_start_timeout is not None
+        else config.RTDE_MOTION_START_TIMEOUT
+    )
+    pre_wait_sleep = (
+        args.pre_wait_sleep
+        if args.pre_wait_sleep is not None
+        else config.CB3_MOTION_PRE_WAIT_SLEEP_S
+    )
+    skip_set_tcp = args.skip_set_tcp or config.SKIP_SET_TCP
+    skip_set_payload = args.skip_set_payload or config.SKIP_SET_PAYLOAD
 
     confirm(
         "Robot da dung san o SCAN_POSE, workspace clear, san sang test cham phoi",
@@ -401,6 +390,19 @@ def main() -> int:
             return 1
         print("Xac nhan vi tri SCAN_POSE: OK")
         print(f"SCAN_POSE TCP in config: {[round(v, 4) for v in config.SCAN_POSE_TCP]}")
+        if not skip_set_tcp:
+            urscript.set_tcp(config.TCP_OFFSET)
+            print("set_tcp applied")
+        else:
+            print("SKIP_SET_TCP: bo qua set_tcp()")
+        if not skip_set_payload:
+            urscript.set_payload(config.PAYLOAD_MASS_KG, config.PAYLOAD_COG)
+            print(
+                "set_payload applied: "
+                f"{config.PAYLOAD_MASS_KG:.2f}kg, cog={config.PAYLOAD_COG}"
+            )
+        else:
+            print("SKIP_SET_PAYLOAD: bo qua set_payload()")
 
         rgb, depth, cam_ts = capture_valid_frames(camera)
         # Read TCP immediately after capture to minimize frame/pose time skew.
@@ -409,7 +411,16 @@ def main() -> int:
         print(f"TCP so voi SCAN_POSE config: {[round(v, 4) for v in scanpose_delta]}")
 
         frame_h, frame_w = depth.shape
-        intr = resolve_intrinsics_for_frame(frame_w, frame_h)
+        intr = resolve_intrinsics_for_frame(
+            frame_w,
+            frame_h,
+            config.CAM_FX,
+            config.CAM_FY,
+            config.CAM_CX,
+            config.CAM_CY,
+            config.CAM_CALIB_WIDTH,
+            config.CAM_CALIB_HEIGHT,
+        )
         fx_eff = intr["fx"]
         fy_eff = intr["fy"]
         cx_eff = intr["cx"]
@@ -504,10 +515,19 @@ def main() -> int:
             cx_eff,
             cy_eff,
         )
-        p_base = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+        p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+        p_base = [
+            p_base_raw[0] + config.PICK_OFFSET_X,
+            p_base_raw[1] + config.PICK_OFFSET_Y,
+            p_base_raw[2] + config.PICK_OFFSET_Z,
+        ]
         print(
             f"p_cam(m)={ [round(vv, 4) for vv in p_cam] }, "
+            f"p_base_raw(m)={ [round(vv, 4) for vv in p_base_raw] }, "
             f"p_base(m)={ [round(vv, 4) for vv in p_base] }"
+        )
+        print(
+            f"pick_offset_base(m)={ [round(config.PICK_OFFSET_X, 4), round(config.PICK_OFFSET_Y, 4), round(config.PICK_OFFSET_Z, 4)] }"
         )
         depth_diag = camera.analyze_depth_roi(depth, target.bbox)
         print(f"Depth debug target: {json.dumps(depth_diag, ensure_ascii=True)}")
@@ -535,27 +555,16 @@ def main() -> int:
             cv2.imwrite(str(preview_path), preview)
             print(f"Da luu preview: {preview_path}")
 
-        approach_pose = build_pick_approach_pose(
-            p_base,
+        approach_z, touch_z, retreat_z = clamp_pick_z_sequence(
+            tcp_pose_at_capture[2],
+            p_base[2],
             config.PICK_APPROACH_OFFSET_Z,
-            tool_rx=config.TOOL_DOWN_RX,
-            tool_ry=config.TOOL_DOWN_RY,
-            tool_rz=config.TOOL_DOWN_RZ,
-        )
-        touch_pose = build_pick_approach_pose(
-            p_base,
             args.touch_offset_z,
-            tool_rx=config.TOOL_DOWN_RX,
-            tool_ry=config.TOOL_DOWN_RY,
-            tool_rz=config.TOOL_DOWN_RZ,
-        )
-        retreat_pose = build_pick_approach_pose(
-            p_base,
             config.PICK_RETREAT_OFFSET_Z,
-            tool_rx=config.TOOL_DOWN_RX,
-            tool_ry=config.TOOL_DOWN_RY,
-            tool_rz=config.TOOL_DOWN_RZ,
         )
+        approach_pose = [p_base[0], p_base[1], approach_z, config.TOOL_DOWN_RX, config.TOOL_DOWN_RY, config.TOOL_DOWN_RZ]
+        touch_pose = [p_base[0], p_base[1], touch_z, config.TOOL_DOWN_RX, config.TOOL_DOWN_RY, config.TOOL_DOWN_RZ]
+        retreat_pose = [p_base[0], p_base[1], retreat_z, config.TOOL_DOWN_RX, config.TOOL_DOWN_RY, config.TOOL_DOWN_RZ]
 
         print(f"Approach pose: {approach_pose}")
         print(f"Touch pose:    {touch_pose}")
@@ -600,7 +609,34 @@ def main() -> int:
         print_pose_delta("Approach", actual_approach_pose, approach_pose)
 
         # Move slowly when touching the part surface.
-        if args.touch_mode == "movel":
+        if args.touch_mode == "movel-bundled":
+            if not skip_set_tcp and not skip_set_payload:
+                urscript.move_linear_with_settings(
+                    touch_pose,
+                    tcp_offset=config.TCP_OFFSET,
+                    payload_kg=config.PAYLOAD_MASS_KG,
+                    payload_cog=config.PAYLOAD_COG,
+                    accel=config.LINEAR_ACCEL,
+                    vel=config.PICK_APPROACH_VEL,
+                )
+            else:
+                pose_str = ",".join(f"{p:.6f}" for p in touch_pose)
+                body_lines = []
+                if not skip_set_tcp:
+                    tcp_str = ",".join(f"{v:.6f}" for v in config.TCP_OFFSET)
+                    body_lines.append(f"set_tcp(p[{tcp_str}])")
+                if not skip_set_payload:
+                    cog_str = ",".join(f"{v:.6f}" for v in config.PAYLOAD_COG)
+                    body_lines.append(f"set_payload({config.PAYLOAD_MASS_KG:.4f}, [{cog_str}])")
+                body_lines.append(
+                    f"movel(p[{pose_str}], a={config.LINEAR_ACCEL}, v={config.PICK_APPROACH_VEL})"
+                )
+                urscript.send_program(
+                    body_lines,
+                    program_name="external_touch_bundled",
+                    one_shot=True,
+                )
+        elif args.touch_mode == "movel":
             urscript.move_linear(touch_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
         else:
             urscript.move_joint_to_pose_ik(
@@ -608,7 +644,15 @@ def main() -> int:
                 accel=max(config.LINEAR_ACCEL, 0.2),
                 vel=max(config.PICK_APPROACH_VEL, 0.1),
             )
-        wait_steady(rtde, "touch")
+        time.sleep(pre_wait_sleep)
+        ok = rtde.wait_steady(
+            timeout_s=config.RTDE_WAIT_TIMEOUT,
+            threshold=config.RTDE_STEADY_THRESHOLD,
+            motion_start_timeout=motion_start_timeout,
+            motion_start_threshold=config.RTDE_MOTION_START_THRESHOLD,
+        )
+        if not ok:
+            print("Canh bao: timeout khi cho robot dung tai buoc touch.")
         actual_touch_pose, _ = rtde.get_tcp_pose_with_timestamp()
         print_pose_delta("Touch", actual_touch_pose, touch_pose)
 
