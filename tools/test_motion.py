@@ -65,11 +65,25 @@ def ensure_steady_or_confirm(rtde, label: str) -> None:
 
 
 def move_joints(urscript, joints, accel, vel):
-    urscript.move_joint(joints, accel=accel, vel=vel)
+    urscript.move_joint_with_settings(
+        joints,
+        tcp_offset=config.TCP_OFFSET,
+        payload_kg=config.PAYLOAD_MASS_KG,
+        payload_cog=config.PAYLOAD_COG,
+        accel=accel,
+        vel=vel,
+    )
 
 
 def move_pose(urscript, pose, accel, vel):
-    urscript.move_linear(pose, accel=accel, vel=vel)
+    urscript.move_linear_with_settings(
+        pose,
+        tcp_offset=config.TCP_OFFSET,
+        payload_kg=config.PAYLOAD_MASS_KG,
+        payload_cog=config.PAYLOAD_COG,
+        accel=accel,
+        vel=vel,
+    )
 
 
 def ensure_joint_target_reached(rtde, target, label: str, tol_deg: float = 3.0) -> None:

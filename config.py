@@ -108,9 +108,9 @@ PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_CAPTU
 PICK_MAX_FINAL_Z_ABOVE_SCAN_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_SCAN_M", "0.005"))
 PICK_MIN_DESCENT_M = float(os.getenv("PICK_MIN_DESCENT_M", "0.02"))
 PICK_MIN_FINAL_BELOW_CAMERA_M = float(os.getenv("PICK_MIN_FINAL_BELOW_CAMERA_M", "0.02"))
-PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.0"))
-PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "-0.02"))
-PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "0.0"))
+PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.081"))
+PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "0.094"))
+PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "-0.087"))
 
 
 # ==================== GRIPPER ONROBOT RG ====================
@@ -215,9 +215,9 @@ def _load_robot_pose_defaults() -> dict:
         "SCAN_APPROACH_JOINTS": [-0.094671, -1.502198, -0.954787, -1.580273, 1.577496, 0.000132],
         "SCAN_POSE_JOINTS": [-0.0937, -1.589512, -1.398178, -1.480151, 1.575771, 0.00012],
         "SCAN_POSE_TCP": [0.564878, -0.157992, 0.201213, 2.152263, 1.979381, 0.237215],
-        "PLACE_APPROACH_CART": [0.375507, -0.128532, 0.983618, 1.239429, 1.151906, 1.139757],
-        "PLACE_POINT_CART": [-0.160261, 0.581075, 0.175169, 0.660504, -2.988518, -0.354024],
-        "PLACE_RETREAT_CART": [-0.160284, 0.581084, 0.175159, 0.660485, -2.988496, -0.354011],
+        "PLACE_APPROACH_CART": [-0.177861, 0.555789, 0.209864, 0.779606, -2.971455, -0.395008],
+        "PLACE_POINT_CART": [-0.182785, 0.565214, 0.109697, 0.798319, -3.033674, -0.135877],
+        "PLACE_RETREAT_CART": [-0.177856, 0.555788, 0.209869, 0.779512, -2.971445, -0.39503],
         "TOOL_DOWN": [2.152263, 1.979381, 0.237215],
     }
 
@@ -479,7 +479,7 @@ CAM_CALIB_WIDTH, CAM_CALIB_HEIGHT = _maybe_fix_stale_intrinsics_baseline()
 
 RTDE_FREQUENCY = float(os.getenv("RTDE_FREQUENCY", "10.0"))  # Hz
 RTDE_STEADY_THRESHOLD = float(os.getenv("RTDE_STEADY_THRESHOLD", "0.001"))  # rad/s
-RTDE_WAIT_TIMEOUT = float(os.getenv("RTDE_WAIT_TIMEOUT", "30.0"))  # s
+RTDE_WAIT_TIMEOUT = float(os.getenv("RTDE_WAIT_TIMEOUT", "35.0"))  # s
 # Timeout đợi robot bắt đầu di chuyển sau khi gửi lệnh
 # CB-series có độ trễ ~0.1-0.5s trước khi joint_speed > 0
 RTDE_MOTION_START_TIMEOUT = float(os.getenv("RTDE_MOTION_START_TIMEOUT", "3.0"))  # s
