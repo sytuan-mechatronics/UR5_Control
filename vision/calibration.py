@@ -4,13 +4,294 @@ Converts pixel coordinates to robot base frame using hand-eye calibration.
 """
 
 import logging
+import json
 import numpy as np
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import config
 
 
 logger = logging.getLogger(__name__)
+_PICK_CORRECTION_CACHE = {
+    "path": None,
+    "mtime_ns": None,
+    "data": None,
+}
+
+
+def _pick_correction_file() -> Path:
+    raw_path = str(getattr(config, "PICK_CORRECTION_MAP_PATH", "pick_correction_map.json")).strip()
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / raw_path
+    return path
+
+
+def _load_pick_correction_map() -> Dict:
+    path = _pick_correction_file()
+    if not path.exists():
+        return {"enabled": False, "reason": f"missing:{path.name}", "points": []}
+
+    stat = path.stat()
+    cache_key = str(path)
+    if (
+        _PICK_CORRECTION_CACHE["path"] == cache_key
+        and _PICK_CORRECTION_CACHE["mtime_ns"] == stat.st_mtime_ns
+        and _PICK_CORRECTION_CACHE["data"] is not None
+    ):
+        return _PICK_CORRECTION_CACHE["data"]
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        data = {"enabled": False, "reason": f"json_error:{exc}", "points": []}
+        _PICK_CORRECTION_CACHE.update({"path": cache_key, "mtime_ns": stat.st_mtime_ns, "data": data})
+        return data
+
+    parsed_points = []
+    for idx, point in enumerate(raw.get("points", []), start=1):
+        try:
+            parsed_points.append(
+                {
+                    "name": str(point.get("name", f"P{idx}")),
+                    "x": float(point["x"]),
+                    "y": float(point["y"]),
+                    "dx": float(point.get("dx", 0.0)),
+                    "dy": float(point.get("dy", 0.0)),
+                    "dz": float(point.get("dz", 0.0)),
+                    "u": float(point["u"]) if "u" in point else None,
+                    "v": float(point["v"]) if "v" in point else None,
+                }
+            )
+        except Exception:
+            continue
+
+    data = {
+        "enabled": bool(parsed_points),
+        "reason": "ok" if parsed_points else "no_points",
+        "points": parsed_points,
+        "path": str(path),
+        "meta": raw.get("meta", {}),
+    }
+    _PICK_CORRECTION_CACHE.update({"path": cache_key, "mtime_ns": stat.st_mtime_ns, "data": data})
+    return data
+
+
+def compute_pick_correction_offset(
+    p_base_raw: List[float],
+    forced_slot: str = "",
+    pick_uv: List[float] = None,
+) -> Tuple[List[float], Dict[str, object]]:
+    """
+    Compute local XY/Z correction from a sparse workspace calibration map.
+
+    The correction map is defined in robot base frame using raw transformed target
+    coordinates before global PICK_OFFSET_X/Y/Z is applied.
+    """
+    global_offset = [
+        float(config.PICK_OFFSET_X),
+        float(config.PICK_OFFSET_Y),
+        float(config.PICK_OFFSET_Z),
+    ]
+    meta = {
+        "enabled": bool(getattr(config, "PICK_CORRECTION_ENABLED", False)),
+        "mode": "global_only",
+        "path": "",
+        "point_count": 0,
+        "forced_slot": forced_slot or "",
+        "pick_uv": [float(pick_uv[0]), float(pick_uv[1])] if pick_uv is not None else [],
+        "local_offset": [0.0, 0.0, 0.0],
+        "global_offset": global_offset,
+        "final_offset": global_offset[:],
+        "used_points": [],
+    }
+
+    if not getattr(config, "PICK_CORRECTION_ENABLED", False):
+        meta["mode"] = "disabled"
+        return global_offset, meta
+
+    correction_map = _load_pick_correction_map()
+    meta["path"] = correction_map.get("path", "")
+    points = correction_map.get("points", [])
+    meta["point_count"] = len(points)
+
+    if not correction_map.get("enabled", False):
+        meta["mode"] = correction_map.get("reason", "no_points")
+        return global_offset, meta
+
+    px = float(p_base_raw[0])
+    py = float(p_base_raw[1])
+    exact_tol_m = float(config.PICK_CORRECTION_EXACT_MM) / 1000.0
+    max_radius_m = max(0.0, float(config.PICK_CORRECTION_MAX_RADIUS_MM) / 1000.0)
+    max_pixel_dist = max(0.0, float(getattr(config, "PICK_CORRECTION_PIXEL_MAX_DIST_PX", 0.0)))
+    neighbor_count = max(1, int(config.PICK_CORRECTION_NEIGHBORS))
+    power = max(0.1, float(config.PICK_CORRECTION_POWER))
+    strategy = str(getattr(config, "PICK_CORRECTION_STRATEGY", "pixel_slot")).strip().lower()
+
+    scored = []
+    for point in points:
+        dist = float(np.hypot(px - point["x"], py - point["y"]))
+        scored.append((dist, point))
+
+    scored.sort(key=lambda item: item[0])
+
+    forced_slot = (forced_slot or "").strip()
+    if forced_slot:
+        forced_point = next((point for point in points if point["name"] == forced_slot), None)
+        if forced_point is None:
+            meta["mode"] = "global_only_forced_slot_missing"
+            return global_offset, meta
+
+        forced_dist = float(np.hypot(px - forced_point["x"], py - forced_point["y"]))
+        if max_radius_m > 0.0 and forced_dist > max_radius_m:
+            meta["mode"] = "global_only_forced_slot_outside_radius"
+            meta["used_points"] = [{"name": forced_point["name"], "dist_mm": round(forced_dist * 1000.0, 3)}]
+            return global_offset, meta
+
+        local_offset = [forced_point["dx"], forced_point["dy"], forced_point.get("dz", 0.0)]
+        final_offset = [global_offset[i] + local_offset[i] for i in range(3)]
+        meta.update(
+            {
+                "mode": "forced_slot",
+                "selected_slot": forced_point["name"],
+                "local_offset": local_offset,
+                "final_offset": final_offset,
+                "used_points": [{"name": forced_point["name"], "dist_mm": round(forced_dist * 1000.0, 3)}],
+            }
+        )
+        return final_offset, meta
+
+    if strategy == "pixel_slot" and pick_uv is not None:
+        pu = float(pick_uv[0])
+        pv = float(pick_uv[1])
+        pixel_scored = []
+        for point in points:
+            if point.get("u") is None or point.get("v") is None:
+                continue
+            pixel_dist = float(np.hypot(pu - point["u"], pv - point["v"]))
+            pixel_scored.append((pixel_dist, point))
+
+        pixel_scored.sort(key=lambda item: item[0])
+        if pixel_scored:
+            nearest_dist_px, nearest_point = pixel_scored[0]
+            if max_pixel_dist > 0.0 and nearest_dist_px > max_pixel_dist:
+                meta["mode"] = "global_only_pixel_outside_radius"
+                meta["used_points"] = [{"name": nearest_point["name"], "dist_px": round(nearest_dist_px, 3)}]
+                return global_offset, meta
+
+            local_offset = [
+                nearest_point["dx"],
+                nearest_point["dy"],
+                nearest_point.get("dz", 0.0),
+            ]
+            final_offset = [global_offset[i] + local_offset[i] for i in range(3)]
+            meta.update(
+                {
+                    "mode": "pixel_slot",
+                    "selected_slot": nearest_point["name"],
+                    "local_offset": local_offset,
+                    "final_offset": final_offset,
+                    "used_points": [{"name": nearest_point["name"], "dist_px": round(nearest_dist_px, 3)}],
+                }
+            )
+            return final_offset, meta
+
+    if scored and scored[0][0] <= exact_tol_m:
+        point = scored[0][1]
+        local_offset = [point["dx"], point["dy"], point.get("dz", 0.0)]
+        final_offset = [global_offset[i] + local_offset[i] for i in range(3)]
+        meta.update(
+            {
+                "mode": "exact",
+                "local_offset": local_offset,
+                "final_offset": final_offset,
+                "used_points": [{"name": point["name"], "dist_mm": round(scored[0][0] * 1000.0, 3)}],
+            }
+        )
+        return final_offset, meta
+
+    if strategy in ("nearest", "slot_only"):
+        if not scored:
+            meta["mode"] = "global_only_no_points"
+            return global_offset, meta
+
+        nearest_dist, nearest_point = scored[0]
+        if max_radius_m > 0.0 and nearest_dist > max_radius_m:
+            meta["mode"] = "global_only_outside_radius"
+            return global_offset, meta
+
+        local_offset = [
+            nearest_point["dx"],
+            nearest_point["dy"],
+            nearest_point.get("dz", 0.0),
+        ]
+        final_offset = [global_offset[i] + local_offset[i] for i in range(3)]
+        meta.update(
+            {
+                "mode": "slot_only",
+                "local_offset": local_offset,
+                "final_offset": final_offset,
+                "selected_slot": nearest_point["name"],
+                "used_points": [{"name": nearest_point["name"], "dist_mm": round(nearest_dist * 1000.0, 3)}],
+            }
+        )
+        return final_offset, meta
+
+    nearby = scored[:neighbor_count]
+    if max_radius_m > 0.0:
+        nearby = [item for item in nearby if item[0] <= max_radius_m]
+
+    if not nearby:
+        meta["mode"] = "global_only_no_neighbors"
+        return global_offset, meta
+
+    weights = []
+    for dist, point in nearby:
+        weight = 1.0 / max(dist, 1e-6) ** power
+        weights.append((weight, point, dist))
+
+    weight_sum = sum(weight for weight, _, _ in weights)
+    local_offset = [0.0, 0.0, 0.0]
+    used_points = []
+    for weight, point, dist in weights:
+        ratio = weight / weight_sum
+        local_offset[0] += point["dx"] * ratio
+        local_offset[1] += point["dy"] * ratio
+        local_offset[2] += point.get("dz", 0.0) * ratio
+        used_points.append(
+            {
+                "name": point["name"],
+                "dist_mm": round(dist * 1000.0, 3),
+                "weight": round(ratio, 4),
+            }
+        )
+
+    final_offset = [global_offset[i] + local_offset[i] for i in range(3)]
+    meta.update(
+        {
+            "mode": "idw",
+            "local_offset": local_offset,
+            "final_offset": final_offset,
+            "used_points": used_points,
+        }
+    )
+    return final_offset, meta
+
+
+def apply_pick_correction(
+    p_base_raw: List[float],
+    forced_slot: str = "",
+    pick_uv: List[float] = None,
+) -> Tuple[List[float], Dict[str, object]]:
+    """Apply global pick offset plus optional local correction-map offset."""
+    final_offset, meta = compute_pick_correction_offset(
+        p_base_raw,
+        forced_slot=forced_slot,
+        pick_uv=pick_uv,
+    )
+    p_base = [float(p_base_raw[i]) + float(final_offset[i]) for i in range(3)]
+    return p_base, meta
 
 
 def pixel_to_camera_3d(

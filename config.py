@@ -9,6 +9,16 @@ from pathlib import Path
 from typing import List, Tuple
 import numpy as np
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional at runtime
+    load_dotenv = None
+
+
+_CONFIG_DIR = Path(__file__).resolve().parent
+if load_dotenv is not None:
+    load_dotenv(_CONFIG_DIR / ".env")
+
 
 # ==================== ROBOT CONNECTIVITY ====================
 
@@ -108,9 +118,19 @@ PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_CAPTU
 PICK_MAX_FINAL_Z_ABOVE_SCAN_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_SCAN_M", "0.005"))
 PICK_MIN_DESCENT_M = float(os.getenv("PICK_MIN_DESCENT_M", "0.02"))
 PICK_MIN_FINAL_BELOW_CAMERA_M = float(os.getenv("PICK_MIN_FINAL_BELOW_CAMERA_M", "0.02"))
-PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.081"))
-PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "0.094"))
-PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "-0.087"))
+PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.066"))
+PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "0.080"))
+PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "-0.088"))
+PICK_CORRECTION_ENABLED = os.getenv("PICK_CORRECTION_ENABLED", "False").lower() == "true"
+PICK_CORRECTION_MAP_PATH = os.getenv("PICK_CORRECTION_MAP_PATH", "pick_correction_map.json").strip()
+PICK_CORRECTION_STRATEGY = os.getenv("PICK_CORRECTION_STRATEGY", "pixel_slot").strip().lower()
+if PICK_CORRECTION_STRATEGY not in ("pixel_slot", "slot_only", "nearest", "idw"):
+    PICK_CORRECTION_STRATEGY = "pixel_slot"
+PICK_CORRECTION_NEIGHBORS = int(os.getenv("PICK_CORRECTION_NEIGHBORS", "4"))
+PICK_CORRECTION_POWER = float(os.getenv("PICK_CORRECTION_POWER", "2.0"))
+PICK_CORRECTION_EXACT_MM = float(os.getenv("PICK_CORRECTION_EXACT_MM", "3.0"))
+PICK_CORRECTION_MAX_RADIUS_MM = float(os.getenv("PICK_CORRECTION_MAX_RADIUS_MM", "180.0"))
+PICK_CORRECTION_PIXEL_MAX_DIST_PX = float(os.getenv("PICK_CORRECTION_PIXEL_MAX_DIST_PX", "180.0"))
 
 
 # ==================== GRIPPER ONROBOT RG ====================
@@ -184,6 +204,21 @@ CAMERA_IP = os.getenv("CAMERA_IP", "").strip()
 CAMERA_NET_PORT = int(os.getenv("CAMERA_NET_PORT", "8090"))
 CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "1920"))
 CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "1080"))
+CAMERA_FPS = int(os.getenv("CAMERA_FPS", "30"))
+CAMERA_LAN_COLOR_FORMATS = [
+    x.strip().upper()
+    for x in os.getenv("CAMERA_LAN_COLOR_FORMATS", "MJPG,BGR,RGB,YUYV,NV12,NV21,I420").split(",")
+    if x.strip()
+]
+CAMERA_USB_COLOR_FORMATS = [
+    x.strip().upper()
+    for x in os.getenv("CAMERA_USB_COLOR_FORMATS", "RGB,BGR,MJPG,YUYV,NV12,NV21,I420").split(",")
+    if x.strip()
+]
+CAMERA_LAN_WAIT_TIMEOUT_MS = int(os.getenv("CAMERA_LAN_WAIT_TIMEOUT_MS", "250"))
+CAMERA_USB_WAIT_TIMEOUT_MS = int(os.getenv("CAMERA_USB_WAIT_TIMEOUT_MS", "1000"))
+CAMERA_LAN_FRAME_RETRIES = int(os.getenv("CAMERA_LAN_FRAME_RETRIES", "4"))
+CAMERA_USB_FRAME_RETRIES = int(os.getenv("CAMERA_USB_FRAME_RETRIES", "8"))
 DEPTH_HOLE_FILL = os.getenv("DEPTH_HOLE_FILL", "True").lower() == "true"
 DEPTH_WINDOW_HALF = int(os.getenv("DEPTH_WINDOW_HALF", "2"))
 DEPTH_INNER_MARGIN_RATIO = float(os.getenv("DEPTH_INNER_MARGIN_RATIO", "0.22"))
@@ -200,6 +235,13 @@ DEPTH_NEAREST_RELAXED_MAX_SPREAD_MM = float(os.getenv("DEPTH_NEAREST_RELAXED_MAX
 DEPTH_BBOX_MIN_VALID_RATIO = float(os.getenv("DEPTH_BBOX_MIN_VALID_RATIO", "0.20"))
 DEPTH_BBOX_MAX_SPREAD_MM = float(os.getenv("DEPTH_BBOX_MAX_SPREAD_MM", "25.0"))
 DEPTH_TCP_STANDOFF_CLAMP_ENABLED = os.getenv("DEPTH_TCP_STANDOFF_CLAMP_ENABLED", "False").lower() == "true"
+
+
+# ==================== TRAY REFERENCE ====================
+
+TRAY_REF_ENABLED = os.getenv("TRAY_REF_ENABLED", "False").lower() == "true"
+TRAY_REF_INNER_CORNERS = (6, 9)
+TRAY_REF_SQUARE_SIZE_M = float(os.getenv("TRAY_REF_SQUARE_SIZE_M", "0.02"))
 
 
 # ==================== ROBOT POSE DEFAULTS ====================
@@ -241,6 +283,12 @@ def _load_robot_pose_defaults() -> dict:
         if "SCAN_POSE_JOINTS" in data and data["SCAN_POSE_JOINTS"].get("tcp_m_rad"):
             defaults["SCAN_POSE_TCP"] = [float(x) for x in data["SCAN_POSE_JOINTS"]["tcp_m_rad"]]
             defaults["TOOL_DOWN"] = [float(x) for x in data["SCAN_POSE_JOINTS"]["tcp_m_rad"][3:6]]
+
+        if "SCAN_POSE" in data and data["SCAN_POSE"].get("joints_rad"):
+            defaults["SCAN_POSE_JOINTS"] = [float(x) for x in data["SCAN_POSE"]["joints_rad"]]
+        if "SCAN_POSE" in data and data["SCAN_POSE"].get("tcp_m_rad"):
+            defaults["SCAN_POSE_TCP"] = [float(x) for x in data["SCAN_POSE"]["tcp_m_rad"]]
+            defaults["TOOL_DOWN"] = [float(x) for x in data["SCAN_POSE"]["tcp_m_rad"][3:6]]
 
         if "SCAN_POSE_TCP" in data and data["SCAN_POSE_TCP"].get("tcp_m_rad"):
             defaults["SCAN_POSE_TCP"] = [float(x) for x in data["SCAN_POSE_TCP"]["tcp_m_rad"]]

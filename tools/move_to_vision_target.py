@@ -27,6 +27,7 @@ import config
 from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
+    apply_pick_correction,
     build_lateral_pre_approach_pose,
     camera_to_base,
     pixel_to_camera_3d,
@@ -313,13 +314,14 @@ def main() -> int:
                 config.TRAY_REF_INNER_CORNERS,
                 config.TRAY_REF_SQUARE_SIZE_M,
             )
-        p_base = [
-            p_base[0] + config.PICK_OFFSET_X,
-            p_base[1] + config.PICK_OFFSET_Y,
-            p_base[2] + config.PICK_OFFSET_Z,
-        ]
+        p_base, correction_meta = apply_pick_correction(p_base)
         print(f"p_cam(m): {[round(vv, 4) for vv in p_cam]}")
         print(f"p_base(m): {[round(vv, 4) for vv in p_base]}  xy_source={xy_source}")
+        print(
+            f"pick_offset_base(m): {[round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])]}  "
+            f"local={ [round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])] } "
+            f"mode={correction_meta.get('mode', 'unknown')}"
+        )
 
         save_path = Path(args.save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)

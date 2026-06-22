@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 import config
 from robot.rtde_client import RTDEClient
 from vision.calibration import (
+    apply_pick_correction,
     axis_angle_to_rotation_matrix,
     camera_to_base,
     pixel_to_camera_3d,
@@ -71,9 +72,6 @@ def main() -> int:
     tray_ref_enabled = bool(getattr(config, "TRAY_REF_ENABLED", False))
     tray_ref_inner_corners = getattr(config, "TRAY_REF_INNER_CORNERS", (6, 9))
     tray_ref_square_size_m = float(getattr(config, "TRAY_REF_SQUARE_SIZE_M", 0.02))
-    pick_offset_x = float(getattr(config, "PICK_OFFSET_X", 0.0))
-    pick_offset_y = float(getattr(config, "PICK_OFFSET_Y", 0.0))
-    pick_offset_z = float(getattr(config, "PICK_OFFSET_Z", 0.0))
 
     print("=== INSPECT TARGET TRANSFORM ===")
     print(f"Robot IP: {args.robot_ip}")
@@ -180,17 +178,14 @@ def main() -> int:
                 tray_ref_inner_corners,
                 tray_ref_square_size_m,
             )
-        p_base = [
-            p_base[0] + pick_offset_x,
-            p_base[1] + pick_offset_y,
-            p_base[2] + pick_offset_z,
-        ]
+        p_base, correction_meta = apply_pick_correction(p_base)
         camera_origin_base = camera_to_base([0.0, 0.0, 0.0], tcp_pose_at_capture, config.T_CAM_TO_TCP)
 
         print(f"p_cam(m): {[round(vv, 4) for vv in p_cam]}")
         print(f"camera_origin_base(m): {[round(vv, 4) for vv in camera_origin_base]}")
         print(f"p_base(m): {[round(vv, 4) for vv in p_base]}")
-        print(f"pick_offset_base(m): {[round(pick_offset_x, 4), round(pick_offset_y, 4), round(pick_offset_z, 4)]}")
+        print(f"pick_offset_base(m): {[round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])]}")
+        print(f"pick_correction_local(m): {[round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])]} mode={correction_meta.get('mode', 'unknown')}")
         print(f"xy_source: {xy_source}")
 
         delta_base = np.array(p_base) - np.array(tcp_pose_at_capture[:3])

@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from robot.rtde_client import RTDEClient
-from vision.calibration import camera_to_base, pixel_to_camera_3d
+from vision.calibration import apply_pick_correction, camera_to_base, pixel_to_camera_3d
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
 from vision.tray_holes import (
@@ -259,17 +259,14 @@ def main() -> int:
                     config.TRAY_REF_INNER_CORNERS,
                     config.TRAY_REF_SQUARE_SIZE_M,
                 )
-            p_base = [
-                p_base_raw[0] + config.PICK_OFFSET_X,
-                p_base_raw[1] + config.PICK_OFFSET_Y,
-                p_base_raw[2] + config.PICK_OFFSET_Z,
-            ]
+            p_base, correction_meta = apply_pick_correction(p_base_raw)
 
             image_path = image_dir / f"sample_{sample_idx:02d}.jpg"
             overlay = draw_overlay(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), target, holes, layout_match)
             cv2.imwrite(str(image_path), overlay)
             print(f"Saved annotated image: {image_path}")
             print(f"Computed p_base(m): {[round(vv, 4) for vv in p_base]}")
+            print(f"pick_offset_base(m): {[round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])]}  local={ [round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])] } mode={correction_meta.get('mode', 'unknown')}")
             print(f"xy_source: {xy_source}")
             print("Hay mo anh, jog TCP cham DUNG diem VISION_PICK tren phoi, roi quay lai day.")
             input("Nhan Enter khi TCP da cham dung diem de doc expected_base tu robot...")

@@ -51,11 +51,16 @@ class OrbbecColorCamera:
         self._pipeline = None
         self._config = None
         self._ctx = None
+        self.active_transport = self.transport
 
-    @staticmethod
-    def _pick_color_profile(profile_list, width, height, fps):
+    def _preferred_color_formats(self):
+        if self.active_transport == "lan":
+            return list(config.CAMERA_LAN_COLOR_FORMATS)
+        return list(config.CAMERA_USB_COLOR_FORMATS)
+
+    def _pick_color_profile(self, profile_list, width, height, fps):
         """Pick supported color profile across pyorbbecsdk versions."""
-        preferred_formats = ["RGB", "BGR", "MJPG", "YUYV", "NV12", "NV21", "I420"]
+        preferred_formats = self._preferred_color_formats()
         for fmt_name in preferred_formats:
             fmt = getattr(ob.OBFormat, fmt_name, None)
             if fmt is None:
@@ -86,6 +91,22 @@ class OrbbecColorCamera:
                 raise RuntimeError("Decode MJPG frame failed")
             return img
 
+        if fmt == getattr(ob.OBFormat, "YUYV", object()) or fmt == getattr(ob.OBFormat, "YUY2", object()):
+            yuyv = raw.reshape((h, w, 2))
+            return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+
+        if fmt == getattr(ob.OBFormat, "NV12", object()):
+            nv12 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+
+        if fmt == getattr(ob.OBFormat, "NV21", object()):
+            nv21 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(nv21, cv2.COLOR_YUV2BGR_NV21)
+
+        if fmt == getattr(ob.OBFormat, "I420", object()):
+            i420 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(i420, cv2.COLOR_YUV2BGR_I420)
+
         if raw.size == h * w * 3:
             rgb_data = raw.reshape((h, w, 3))
             return cv2.cvtColor(rgb_data, cv2.COLOR_RGB2BGR)
@@ -102,6 +123,7 @@ class OrbbecColorCamera:
 
         devices = self._ctx.query_devices()
         device = None
+        selected_is_lan = False
         if devices.get_count() > 0:
             for idx in range(devices.get_count()):
                 cand = devices.get_device_by_index(idx)
@@ -118,11 +140,13 @@ class OrbbecColorCamera:
                 if self.ip and dev_ip and dev_ip != self.ip:
                     continue
                 device = cand
+                selected_is_lan = is_lan
                 break
 
         if device is None and self.transport == "lan" and self.ip:
             try:
                 device = self._ctx.create_net_device(self.ip, self.net_port)
+                selected_is_lan = True
             except Exception as exc:
                 raise RuntimeError(
                     f"Không mở được camera LAN tại {self.ip}:{self.net_port}: {exc}"
@@ -134,6 +158,8 @@ class OrbbecColorCamera:
                 f"transport={self.transport}, ip={self.ip or '-'}."
             )
 
+        self.active_transport = "lan" if selected_is_lan else "usb"
+
         self._pipeline = ob.Pipeline(device)
         self._config = ob.Config()
         profile_list = self._pipeline.get_stream_profile_list(ob.OBSensorType.COLOR_SENSOR)
@@ -143,7 +169,12 @@ class OrbbecColorCamera:
         return self
 
     def read(self):
-        frameset = self._pipeline.wait_for_frames(1000)
+        wait_timeout_ms = (
+            int(config.CAMERA_LAN_WAIT_TIMEOUT_MS)
+            if self.active_transport == "lan"
+            else int(config.CAMERA_USB_WAIT_TIMEOUT_MS)
+        )
+        frameset = self._pipeline.wait_for_frames(wait_timeout_ms)
         if frameset is None:
             return None
 

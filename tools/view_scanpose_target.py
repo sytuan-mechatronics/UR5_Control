@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 import config
 from robot.rtde_client import RTDEClient
 from vision.calibration import (
+    apply_pick_correction,
     build_lateral_pre_approach_pose,
     camera_to_base,
     pixel_to_camera_3d,
@@ -94,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def draw_overlay(image_bgr, detections, target, depth_mm, tcp_pose, p_cam, p_base, pre_approach_pose, approach_z, touch_z, tray_ref=None, xy_source="depth_only", holes=None, snapped_hole=None, layout_match=None):
+def draw_overlay(image_bgr, detections, target, depth_mm, tcp_pose, p_cam, p_base, pre_approach_pose, approach_z, touch_z, tray_ref=None, xy_source="depth_only", holes=None, snapped_hole=None, layout_match=None, pick_offset=None):
     frame = image_bgr.copy()
     h, w = frame.shape[:2]
     cx_frame, cy_frame = int(w / 2), int(h / 2)
@@ -145,7 +146,7 @@ def draw_overlay(image_bgr, detections, target, depth_mm, tcp_pose, p_cam, p_bas
             f"xy_source={xy_source}",
             f"p_cam=({p_cam[0]:.4f}, {p_cam[1]:.4f}, {p_cam[2]:.4f}) m",
             f"p_base=({p_base[0]:.4f}, {p_base[1]:.4f}, {p_base[2]:.4f}) m",
-            f"pick_offset=({config.PICK_OFFSET_X:.4f}, {config.PICK_OFFSET_Y:.4f}, {config.PICK_OFFSET_Z:.4f}) m",
+            f"pick_offset=({pick_offset[0]:.4f}, {pick_offset[1]:.4f}, {pick_offset[2]:.4f}) m" if pick_offset is not None else f"pick_offset=({config.PICK_OFFSET_X:.4f}, {config.PICK_OFFSET_Y:.4f}, {config.PICK_OFFSET_Z:.4f}) m",
             f"scan_tcp=({tcp_pose[0]:.4f}, {tcp_pose[1]:.4f}, {tcp_pose[2]:.4f}) m",
             f"pre_z={pre_approach_pose[2]:.4f} approach_z={approach_z:.4f} touch_z={touch_z:.4f}",
         ]
@@ -280,11 +281,7 @@ def main() -> int:
                     config.TRAY_REF_INNER_CORNERS,
                     config.TRAY_REF_SQUARE_SIZE_M,
                 )
-            p_base = [
-                p_base[0] + config.PICK_OFFSET_X,
-                p_base[1] + config.PICK_OFFSET_Y,
-                p_base[2] + config.PICK_OFFSET_Z,
-            ]
+            p_base, correction_meta = apply_pick_correction(p_base)
             camera_origin_in_base = camera_to_base([0.0, 0.0, 0.0], tcp_pose_at_capture, config.T_CAM_TO_TCP)
             current_scan_z = tcp_pose_at_capture[2]
             approach_z, touch_z, retreat_z = clamp_pick_z_sequence(
@@ -312,7 +309,8 @@ def main() -> int:
             print(f"p_cam(m)={ [round(vv, 4) for vv in p_cam] }")
             print(f"camera_origin_base(m)={ [round(vv, 4) for vv in camera_origin_in_base] }")
             print(f"p_base(m)={ [round(vv, 4) for vv in p_base] }")
-            print(f"pick_offset_base(m)={ [round(config.PICK_OFFSET_X, 4), round(config.PICK_OFFSET_Y, 4), round(config.PICK_OFFSET_Z, 4)] }")
+            print(f"pick_offset_base(m)={ [round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])] }")
+            print(f"pick_correction_local(m)={ [round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])] } mode={correction_meta.get('mode', 'unknown')}")
             print(f"xy_source={xy_source}")
             if snapped_hole is not None:
                 if "id" in snapped_hole:
@@ -344,6 +342,7 @@ def main() -> int:
                 holes=holes,
                 snapped_hole=snapped_hole,
                 layout_match=layout_match,
+                pick_offset=correction_meta.get("final_offset", [config.PICK_OFFSET_X, config.PICK_OFFSET_Y, config.PICK_OFFSET_Z]),
             )
 
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)

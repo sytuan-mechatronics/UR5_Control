@@ -2,6 +2,74 @@
 
 Tai lieu nay tong hop cac su co da gap trong buoi lam viec hom nay, cach chan doan, cach sua, va trang thai hien tai cua du an.
 
+## Cap nhat 2026-06-22
+
+Hom nay tap trung vao 4 nhom van de moi:
+
+1. Chuyen nhanh camera `LAN` sang logic lay frame on dinh hon va dong bo cach lay frame do cho runtime.
+2. Bo sung he thong `pick_correction_map.json` de hieu chinh sai so vision theo tung slot thay vi chi dung `global offset`.
+3. Debug tinh huong vision nham `slot_3` va `slot_4`, dong thoi bo sung che do chon slot theo pixel gan nhat.
+4. Thu doi `SCAN_POSE` va map slot moi, sau do xac nhan ket qua khong on dinh va rollback ve bo `SCAN_POSE` cu cung map 5 slot ban dau.
+
+### Van de thuc te da gap
+
+- Co luc thay `config` nhung toa do gap khong doi:
+  - Nguyen nhan la process Python dang chay van giu config da nap tu truoc.
+  - Cach xu ly: tat han process cu va chay lai de nap lai `config.py`, `.env`, va map correction.
+
+- Co luc chinh `offset X` nhung ket qua khong doi:
+  - Nguyen nhan khong phai do truc `X/Y/Z` bi dao, ma do runtime dang an `pick_correction_map.json` theo slot, nen local correction ghi de ket qua global offset.
+  - Cach xu ly: in ro `p_base_raw`, `global_offset`, `local_offset`, `selected_slot`, `final_offset`.
+
+- Co luc test mot phoi nhung runtime lai nhan sang slot ben canh:
+  - Nguyen nhan la strategy chon correction theo toa do base gan nhat hoac noi suy, trong khi `slot_3` va `slot_4` gan nhau.
+  - Cach xu ly: them strategy `pixel_slot`, them `u/v` vao map, va in `selected_slot` de nhin thay runtime dang dung diem nao.
+
+- Co luc target nhay sang toa do rat xa, den muc robot dung an toan:
+  - Nguyen nhan la `SCAN_POSE` moi va map moi khong con dong bo voi bo du lieu slot cu.
+  - Cach xu ly: rollback ve `SCAN_POSE` cu va map 5 slot ban dau.
+
+### Thay doi code chinh trong ngay
+
+- `vision/femto_camera.py`
+  - toi uu luong lay anh cho `LAN`
+  - ho tro uu tien format mau khac nhau cho `LAN` va `USB`
+  - them convert frame ve BGR thong nhat trong runtime
+
+- `config.py`
+  - tu dong nap `.env`
+  - bo sung tham so cho `LAN camera`
+  - bo sung tham so `TRAY_REF_*`
+  - bo sung tham so `PICK_CORRECTION_*`
+  - bo sung doc `SCAN_POSE` truc tiep tu `robot_poses.json`
+
+- `vision/calibration.py`
+  - them loader cache cho `pick_correction_map.json`
+  - them `compute_pick_correction_offset()`
+  - them `apply_pick_correction()`
+  - ho tro `forced_slot`, `pick_uv`, `pixel_slot`, `slot_only`, `nearest`, `idw`
+
+- `tools/test_scanpose_touch.py`
+  - in `runtime snapshot`
+  - in ro `p_cam`, `p_base_raw`, `p_base`, `global/local/final offset`
+  - in `selected_slot`
+  - them `--force-slot`
+
+- `core/pick_place.py`
+  - ap dung cung logic correction map vao luong chay that, khong chi tool test
+
+### Trang thai cuoi ngay
+
+- He thong da co day du logic de hieu chinh theo tung slot.
+- Tuy nhien bo `SCAN_POSE` moi va map moi chua du on dinh de dua vao chay that.
+- Da rollback:
+  - `SCAN_POSE` ve bo cu
+  - `pick_correction_map.json` ve bo 5 slot ban dau
+- Buoi test tiep theo nen di theo thu tu:
+  1. giu nguyen `SCAN_POSE` cu
+  2. xac nhan runtime dang doc dung map cu
+  3. neu can day lai slot, day tung slot mot va restart process giua cac lan test quan trong
+
 Muc tieu:
 
 - luu lai cac loi da gap de lan sau khong bi lap lai

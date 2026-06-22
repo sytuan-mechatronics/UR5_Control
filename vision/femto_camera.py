@@ -12,8 +12,9 @@ If pyorbbecsdk is not available, ensure:
 
 import logging
 import time
+import cv2
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 import config
 
@@ -95,6 +96,128 @@ class FemtoCamera:
         self.pipeline: Optional[ob.Pipeline] = None
         self.config: Optional[ob.Config] = None
         self.device_info = {}
+        self.active_transport = self.transport
+        self.fps = int(config.CAMERA_FPS)
+        self.last_frame_wall_time = 0.0
+        self.frame_counter = 0
+        self.color_format_name = ""
+        self.color_frame_size = (self.width, self.height)
+
+    def _is_lan_mode(self) -> bool:
+        return self.active_transport == "lan"
+
+    def _preferred_color_formats(self) -> List[str]:
+        if self._is_lan_mode():
+            return list(config.CAMERA_LAN_COLOR_FORMATS)
+        return list(config.CAMERA_USB_COLOR_FORMATS)
+
+    def _wait_timeout_ms(self) -> int:
+        if self._is_lan_mode():
+            return int(config.CAMERA_LAN_WAIT_TIMEOUT_MS)
+        return int(config.CAMERA_USB_WAIT_TIMEOUT_MS)
+
+    def _frame_retries(self) -> int:
+        if self._is_lan_mode():
+            return int(config.CAMERA_LAN_FRAME_RETRIES)
+        return int(config.CAMERA_USB_FRAME_RETRIES)
+
+    def _pick_color_profile(self, profiles):
+        """Pick color profile with transport-specific format priority."""
+        for fmt_name in self._preferred_color_formats():
+            fmt_value = _enum_value(ob, ["Format", "OBFormat"], [fmt_name])
+            if fmt_value is None:
+                continue
+            try:
+                if hasattr(profiles, "get_video_stream_profile"):
+                    return profiles.get_video_stream_profile(
+                        self.width,
+                        self.height,
+                        fmt_value,
+                        self.fps,
+                    )
+            except Exception:
+                continue
+
+        if hasattr(profiles, "get_default_video_stream_profile"):
+            return profiles.get_default_video_stream_profile()
+
+        if profiles:
+            return profiles[0]
+
+        return None
+
+    def _pick_depth_profile(self, profiles):
+        """Pick depth profile with requested resolution when possible."""
+        y16 = _enum_value(ob, ["Format", "OBFormat"], ["Y16"])
+        if y16 is not None and hasattr(profiles, "get_video_stream_profile"):
+            try:
+                return profiles.get_video_stream_profile(
+                    self.width,
+                    self.height,
+                    y16,
+                    self.fps,
+                )
+            except Exception:
+                pass
+
+        if hasattr(profiles, "get_default_video_stream_profile"):
+            return profiles.get_default_video_stream_profile()
+
+        if profiles:
+            return profiles[0]
+
+        return None
+
+    def _frame_to_bgr(self, color_frame) -> np.ndarray:
+        """Convert Orbbec color frame into OpenCV BGR regardless of transport."""
+        frame_data = _call_any(color_frame, ["get_data", "data"])
+        raw = np.frombuffer(frame_data, dtype=np.uint8)
+        color_h = _call_any(color_frame, ["get_height", "getHeight"])
+        color_w = _call_any(color_frame, ["get_width", "getWidth"])
+        fmt = _call_any(color_frame, ["get_format", "getFormat"])
+
+        rgb_fmt = _enum_value(ob, ["Format", "OBFormat"], ["RGB", "RGB888"])
+        bgr_fmt = _enum_value(ob, ["Format", "OBFormat"], ["BGR"])
+        mjpg_fmt = _enum_value(ob, ["Format", "OBFormat"], ["MJPG", "MJPEG"])
+        yuyv_fmt = _enum_value(ob, ["Format", "OBFormat"], ["YUYV", "YUY2"])
+        nv12_fmt = _enum_value(ob, ["Format", "OBFormat"], ["NV12"])
+        nv21_fmt = _enum_value(ob, ["Format", "OBFormat"], ["NV21"])
+        i420_fmt = _enum_value(ob, ["Format", "OBFormat"], ["I420", "YUV420"])
+
+        if fmt == rgb_fmt:
+            rgb = raw.reshape((color_h, color_w, 3))
+            return rgb[:, :, ::-1].copy()
+
+        if fmt == bgr_fmt:
+            return raw.reshape((color_h, color_w, 3)).copy()
+
+        if fmt == mjpg_fmt:
+            img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError("Decode MJPG frame failed")
+            return img
+
+        if fmt == yuyv_fmt:
+            yuyv = raw.reshape((color_h, color_w, 2))
+            return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+
+        if fmt == nv12_fmt:
+            nv12 = raw.reshape((color_h * 3 // 2, color_w))
+            return cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+
+        if fmt == nv21_fmt:
+            nv21 = raw.reshape((color_h * 3 // 2, color_w))
+            return cv2.cvtColor(nv21, cv2.COLOR_YUV2BGR_NV21)
+
+        if fmt == i420_fmt:
+            i420 = raw.reshape((color_h * 3 // 2, color_w))
+            return cv2.cvtColor(i420, cv2.COLOR_YUV2BGR_I420)
+
+        if raw.size == color_h * color_w * 3:
+            packed = raw.reshape((color_h, color_w, 3))
+            return packed[:, :, ::-1].copy()
+
+        raise RuntimeError(f"Unsupported color frame format: {fmt}")
 
     def _query_devices(self, ctx):
         """Enumerate both USB and LAN devices when SDK supports it."""
@@ -196,6 +319,11 @@ class FemtoCamera:
                 self.device_info.get("name", ""),
                 self.device_info.get("serial", ""),
             )
+            self.active_transport = (
+                "lan"
+                if self.device_info.get("connection_type") == "LAN" or self.device_info.get("ip")
+                else "usb"
+            )
 
             # Create pipeline
             self.pipeline = ob.Pipeline(device)
@@ -219,43 +347,17 @@ class FemtoCamera:
                     ["get_stream_profile_list", "getStreamProfileList"],
                     color_sensor,
                 )
-
-                # New SDK style: profile_list object with getters.
-                if hasattr(profiles, "get_video_stream_profile"):
-                    rgb_fmt = _enum_value(ob, ["Format", "OBFormat"], ["RGB", "RGB888"])
-                    try:
-                        color_profile = profiles.get_video_stream_profile(
-                            self.width,
-                            self.height,
-                            rgb_fmt,
-                            0,
-                        )
-                        logger.info(
-                            f"Requested color profile: {self.width}x{self.height} → OK"
-                        )
-                    except Exception:
-                        logger.warning(
-                            f"Profile {self.width}x{self.height} không tìm thấy, "
-                            "dùng default. Kiểm tra CAMERA_WIDTH/HEIGHT trong config."
-                        )
-                        color_profile = profiles.get_default_video_stream_profile()
-                else:
-                    # Legacy style: iterable profiles.
-                    for profile in profiles:
-                        w = _call_any(profile, ["get_width", "getWidth"])
-                        h = _call_any(profile, ["get_height", "getHeight"])
-                        if w == self.width and h == self.height:
-                            color_profile = profile
-                            break
-                if color_profile is None:
-                    if hasattr(profiles, "get_default_video_stream_profile"):
-                        color_profile = profiles.get_default_video_stream_profile()
-                    elif profiles:
-                        color_profile = profiles[0]
+                color_profile = self._pick_color_profile(profiles)
 
                 if color_profile is not None:
                     w = _call_any(color_profile, ["get_width", "getWidth"])
                     h = _call_any(color_profile, ["get_height", "getHeight"])
+                    self.color_frame_size = (w, h)
+                    try:
+                        fmt_obj = _call_any(color_profile, ["get_format", "getFormat"])
+                        self.color_format_name = getattr(fmt_obj, "name", str(fmt_obj))
+                    except Exception:
+                        self.color_format_name = "unknown"
                     if w != self.width or h != self.height:
                         logger.warning(
                             f"Requested {self.width}x{self.height} not found, "
@@ -268,7 +370,13 @@ class FemtoCamera:
                 _call_any(self.config, ["enable_stream", "enableStream"], color_profile)
                 w = _call_any(color_profile, ["get_width", "getWidth"])
                 h = _call_any(color_profile, ["get_height", "getHeight"])
-                logger.info(f"Color stream: {w}x{h}")
+                logger.info(
+                    "Color stream: %sx%s fmt=%s transport=%s",
+                    w,
+                    h,
+                    self.color_format_name or "unknown",
+                    self.active_transport,
+                )
 
             # Configure depth stream
             depth_profile = None
@@ -286,10 +394,7 @@ class FemtoCamera:
                     ["get_stream_profile_list", "getStreamProfileList"],
                     depth_sensor,
                 )
-                if hasattr(profiles, "get_default_video_stream_profile"):
-                    depth_profile = profiles.get_default_video_stream_profile()
-                elif profiles:
-                    depth_profile = profiles[0]
+                depth_profile = self._pick_depth_profile(profiles)
             except Exception as e:
                 logger.warning(f"Could not configure depth profile: {e}")
 
@@ -373,8 +478,13 @@ class FemtoCamera:
         try:
             # Wait for frameset with retries; camera often needs warmup cycles.
             frameset = None
-            for _ in range(8):
-                frameset = _call_any(self.pipeline, ["wait_for_frames", "waitForFrames"], 1000)
+            wait_timeout_ms = self._wait_timeout_ms()
+            for _ in range(self._frame_retries()):
+                frameset = _call_any(
+                    self.pipeline,
+                    ["wait_for_frames", "waitForFrames"],
+                    wait_timeout_ms,
+                )
                 if frameset:
                     break
             if not frameset:
@@ -383,13 +493,7 @@ class FemtoCamera:
             # Get color frame
             color_frame = _call_any(frameset, ["get_color_frame", "getColorFrame"])
             if color_frame:
-                rgb_data = _call_any(color_frame, ["get_data", "data"])
-                rgb_array = np.frombuffer(rgb_data, dtype=np.uint8)
-                color_h = _call_any(color_frame, ["get_height", "getHeight"])
-                color_w = _call_any(color_frame, ["get_width", "getWidth"])
-                rgb_array = rgb_array.reshape(
-                    (color_h, color_w, 3)
-                )
+                rgb_array = self._frame_to_bgr(color_frame)
                 logger.debug(f"RGB frame: {rgb_array.shape}")
             else:
                 logger.warning("No color frame in frameset")
@@ -416,6 +520,8 @@ class FemtoCamera:
             else:
                 raise RuntimeError("No depth frame in frameset")
 
+            self.last_frame_wall_time = time.time()
+            self.frame_counter += 1
             return rgb_array, depth_array
 
         except Exception as e:

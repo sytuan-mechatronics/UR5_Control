@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from robot.rtde_client import RTDEClient
-from vision.calibration import camera_to_base, pixel_to_camera_3d
+from vision.calibration import apply_pick_correction, camera_to_base, pixel_to_camera_3d
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
 from vision.tray_reference import refine_base_xy_with_checkerboard
@@ -195,11 +195,7 @@ def main() -> int:
                 config.TRAY_REF_SQUARE_SIZE_M,
             )
 
-        p_base = [
-            p_base_raw[0] + config.PICK_OFFSET_X,
-            p_base_raw[1] + config.PICK_OFFSET_Y,
-            p_base_raw[2] + config.PICK_OFFSET_Z,
-        ]
+        p_base, correction_meta = apply_pick_correction(p_base_raw)
         if args.teach_expected:
             print("\n=== TEACH EXPECTED BASE ===")
             print("Vision da chon diem sau tren phoi:")
@@ -218,7 +214,8 @@ def main() -> int:
 
         print(f"p_cam(m): {[round(vv, 4) for vv in p_cam]}")
         print(f"p_base_raw(m): {[round(vv, 4) for vv in p_base_raw]}")
-        print(f"pick_offset_base(m): {[round(config.PICK_OFFSET_X, 4), round(config.PICK_OFFSET_Y, 4), round(config.PICK_OFFSET_Z, 4)]}")
+        print(f"pick_offset_base(m): {[round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])]}")
+        print(f"pick_correction_local(m): {[round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])]} mode={correction_meta.get('mode', 'unknown')}")
         print(f"p_base_final(m): {[round(vv, 4) for vv in p_base]}")
         print(f"xy_source: {xy_source}")
         print(f"expected_base(m): {[round(vv, 4) for vv in expected_base]}")

@@ -91,6 +91,10 @@ class OrbbecBackend:
         self._selected_net_port = None
         self.last_frame_wall_time = 0.0
         self.frame_counter = 0
+        self.active_transport = self.transport
+        self.color_format_name = ""
+        self.wait_timeout_ms = int(config.CAMERA_USB_WAIT_TIMEOUT_MS)
+        self.frame_retries = int(config.CAMERA_USB_FRAME_RETRIES)
 
     def _candidate_net_ports(self):
         ports = [self.net_port]
@@ -106,10 +110,18 @@ class OrbbecBackend:
             pass
         return ctx.query_devices()
 
+    def _is_lan_mode(self):
+        return self.active_transport == "lan"
+
+    def _preferred_color_formats(self):
+        if self._is_lan_mode():
+            return list(config.CAMERA_LAN_COLOR_FORMATS)
+        return list(config.CAMERA_USB_COLOR_FORMATS)
+
     def _pick_color_profile(self, profile_list):
         """Pick the best available color profile for current SDK/device."""
         ob = self._ob
-        preferred_formats = ["RGB", "BGR", "MJPG", "YUYV", "NV12", "NV21", "I420"]
+        preferred_formats = self._preferred_color_formats()
 
         for fmt_name in preferred_formats:
             fmt = getattr(ob.OBFormat, fmt_name, None)
@@ -166,6 +178,22 @@ class OrbbecBackend:
             if img is None:
                 raise RuntimeError("Decode MJPG frame failed")
             return img
+
+        if fmt == getattr(ob.OBFormat, "YUYV", object()) or fmt == getattr(ob.OBFormat, "YUY2", object()):
+            yuyv = raw.reshape((h, w, 2))
+            return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+
+        if fmt == getattr(ob.OBFormat, "NV12", object()):
+            nv12 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+
+        if fmt == getattr(ob.OBFormat, "NV21", object()):
+            nv21 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(nv21, cv2.COLOR_YUV2BGR_NV21)
+
+        if fmt == getattr(ob.OBFormat, "I420", object()):
+            i420 = raw.reshape((h * 3 // 2, w))
+            return cv2.cvtColor(i420, cv2.COLOR_YUV2BGR_I420)
 
         # Generic fallback for unrecognized format: try 3-channel packed RGB/BGR.
         if raw.size == h * w * 3:
@@ -244,12 +272,28 @@ class OrbbecBackend:
             shown_port = self._selected_net_port or self.net_port
             print(f"  Thiết bị : Orbbec LAN @ {self._ip}:{shown_port}")
 
+        self.active_transport = "lan" if (selected_info and selected_info[1]) or self.transport == "lan" else "usb"
+        self.wait_timeout_ms = (
+            int(config.CAMERA_LAN_WAIT_TIMEOUT_MS)
+            if self._is_lan_mode()
+            else int(config.CAMERA_USB_WAIT_TIMEOUT_MS)
+        )
+        self.frame_retries = (
+            int(config.CAMERA_LAN_FRAME_RETRIES)
+            if self._is_lan_mode()
+            else int(config.CAMERA_USB_FRAME_RETRIES)
+        )
+
         self._pipeline = ob.Pipeline(selected_device)
         self._config   = ob.Config()
 
         # Bật stream màu và depth từ profile list để tương thích nhiều SDK version.
         color_profiles = self._pipeline.get_stream_profile_list(ob.OBSensorType.COLOR_SENSOR)
         color_profile = self._pick_color_profile(color_profiles)
+        try:
+            self.color_format_name = color_profile.get_format().name
+        except Exception:
+            self.color_format_name = "unknown"
         self._config.enable_stream(color_profile)
 
         depth_profiles = self._pipeline.get_stream_profile_list(ob.OBSensorType.DEPTH_SENSOR)
@@ -299,8 +343,8 @@ class OrbbecBackend:
         color_frame = None
         depth_frame = None
 
-        for _ in range(4):
-            frameset = self._pipeline.wait_for_frames(250)
+        for _ in range(self.frame_retries):
+            frameset = self._pipeline.wait_for_frames(self.wait_timeout_ms)
             if frameset is None:
                 continue
 
@@ -446,12 +490,12 @@ def auto_select_backend(force=None, width=1280, height=720, ip="", transport="au
             raise RuntimeError("Transport LAN yêu cầu --ip")
         shown_port = int(net_port if net_port is not None else config.CAMERA_NET_PORT)
         print(f"[Backend] LAN mode: {ip}:{shown_port}")
-        return OrbbecBackend(width, height, ip=ip, transport="lan", net_port=net_port)
+        return OrbbecBackend(width, height, fps=config.CAMERA_FPS, ip=ip, transport="lan", net_port=net_port)
     if transport == "usb":
         print("[Backend] USB mode")
         if force == "opencv":
             return OpenCVBackend(width, height)
-        return OrbbecBackend(width, height, transport="usb")
+        return OrbbecBackend(width, height, fps=config.CAMERA_FPS, transport="usb")
 
     # ── Ép buộc backend cụ thể ────────────────────────────────────
     if force == "opencv":
@@ -460,7 +504,7 @@ def auto_select_backend(force=None, width=1280, height=720, ip="", transport="au
 
     if force == "orbbec":
         print("[Backend] Ép dùng pyorbbecsdk (Orbbec SDK)")
-        return OrbbecBackend(width, height, ip=ip, transport="auto", net_port=net_port)
+        return OrbbecBackend(width, height, fps=config.CAMERA_FPS, ip=ip, transport="auto", net_port=net_port)
 
     # ── Tự động detect ────────────────────────────────────────────
     diag = _orbbec_diagnostics()
@@ -500,7 +544,7 @@ def auto_select_backend(force=None, width=1280, height=720, ip="", transport="au
             print(
                 f"  [{idx}] {dev['name']} | SN={dev['serial']} | FW={dev['firmware']} | IP={dev.get('ip','')}"
             )
-    return OrbbecBackend(width, height, ip=ip, transport="auto", net_port=net_port)
+    return OrbbecBackend(width, height, fps=config.CAMERA_FPS, ip=ip, transport="auto", net_port=net_port)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -785,6 +829,8 @@ def run(args):
             extra_lines = [
                 f"Frames: {getattr(backend, 'frame_counter', 0)}",
                 f"Reconnects: {reconnect_attempts}",
+                f"Transport active: {getattr(backend, 'active_transport', backend.NAME)}",
+                f"Color fmt: {getattr(backend, 'color_format_name', '?')}",
             ]
             if stale_frame_count > 0:
                 extra_lines.append(f"STALE frame: {stale_ms} ms")

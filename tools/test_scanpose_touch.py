@@ -25,6 +25,8 @@ import config
 from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
+    _load_pick_correction_map,
+    apply_pick_correction,
     build_pick_approach_pose,
     clamp_pick_z_sequence,
     camera_origin_to_base,
@@ -38,6 +40,24 @@ from vision.femto_camera import FemtoCamera
 
 
 WINDOW_PREVIEW = "SCANPOSE TOUCH PREVIEW"
+
+
+def print_runtime_snapshot() -> None:
+    correction_map = _load_pick_correction_map()
+    print(f"Runtime repo root: {ROOT}")
+    print(f"Runtime config file: {Path(config.__file__).resolve()}")
+    print(f"PICK_CORRECTION_ENABLED: {config.PICK_CORRECTION_ENABLED}")
+    print(f"PICK_CORRECTION_MAP_PATH: {config.PICK_CORRECTION_MAP_PATH}")
+    print(f"PICK_CORRECTION_POINTS: {len(correction_map.get('points', []))}")
+    print(f"PICK_CORRECTION_STATUS: {correction_map.get('reason', 'unknown')}")
+    print(
+        "GLOBAL_PICK_OFFSET: "
+        f"{[round(float(config.PICK_OFFSET_X), 4), round(float(config.PICK_OFFSET_Y), 4), round(float(config.PICK_OFFSET_Z), 4)]}"
+    )
+    print(
+        "T_CAM_TO_TCP translation(m): "
+        f"{[round(float(config.T_CAM_TO_TCP[0][3]), 4), round(float(config.T_CAM_TO_TCP[1][3]), 4), round(float(config.T_CAM_TO_TCP[2][3]), 4)]}"
+    )
 
 
 def confirm(message: str, force: bool) -> None:
@@ -293,6 +313,11 @@ def parse_args() -> argparse.Namespace:
         help="Motion mode used only for the descend-to-touch step",
     )
     parser.add_argument(
+        "--force-slot",
+        default="",
+        help="Ep dung correction cua mot slot cu the, vd: slot_4",
+    )
+    parser.add_argument(
         "--skip-set-payload",
         action="store_true",
         help="Bo qua set_payload() de test anh huong cua payload/CoG sai",
@@ -340,6 +365,9 @@ def main() -> int:
     print(f"Robot IP: {args.robot_ip}")
     print("Flow: scanpose -> vision -> touch -> return scanpose -> stop")
     print(f"Touch mode: {args.touch_mode}")
+    if args.force_slot:
+        print(f"Force slot: {args.force_slot}")
+    print_runtime_snapshot()
     motion_start_timeout = (
         args.motion_start_timeout
         if args.motion_start_timeout is not None
@@ -467,11 +495,14 @@ def main() -> int:
             wait_steady(rtde, "return_scanpose_no_valid_target")
             return 1
 
-        u, v = target.center
-        depth_mm = camera.get_reliable_depth(depth, target.bbox)
+        target = detector.refine_pick_point(rgb, target, depth)
+        u, v = target.pick_point
+        depth_mm, depth_bbox = detector.resolve_pick_depth(depth, target)
         print(
             f"Target: label={target.label}, conf={target.confidence:.3f}, "
-            f"center=({u:.1f},{v:.1f}), depth={depth_mm:.1f} mm"
+            f"bbox_center=({target.center[0]:.1f},{target.center[1]:.1f}), "
+            f"pick=({u:.1f},{v:.1f}), depth={depth_mm:.1f} mm, "
+            f"bbox={target.bbox}, pick_bbox={target.pick_bbox}, depth_bbox={depth_bbox}, source={target.pick_source}"
         )
         if depth_mm <= 0:
             print("Depth khong hop le. Se ve SCAN_POSE va ket thuc.")
@@ -516,19 +547,25 @@ def main() -> int:
             cy_eff,
         )
         p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
-        p_base = [
-            p_base_raw[0] + config.PICK_OFFSET_X,
-            p_base_raw[1] + config.PICK_OFFSET_Y,
-            p_base_raw[2] + config.PICK_OFFSET_Z,
-        ]
+        p_base, correction_meta = apply_pick_correction(
+            p_base_raw,
+            forced_slot=args.force_slot,
+            pick_uv=[u, v],
+        )
         print(
             f"p_cam(m)={ [round(vv, 4) for vv in p_cam] }, "
             f"p_base_raw(m)={ [round(vv, 4) for vv in p_base_raw] }, "
             f"p_base(m)={ [round(vv, 4) for vv in p_base] }"
         )
+        print(f"pick_offset_base(m)={ [round(vv, 4) for vv in correction_meta.get('final_offset', [0.0, 0.0, 0.0])] }")
         print(
-            f"pick_offset_base(m)={ [round(config.PICK_OFFSET_X, 4), round(config.PICK_OFFSET_Y, 4), round(config.PICK_OFFSET_Z, 4)] }"
+            f"pick_correction_local(m)={ [round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])] } "
+            f"mode={correction_meta.get('mode', 'unknown')}"
         )
+        if correction_meta.get("selected_slot"):
+            print(f"selected_slot={correction_meta.get('selected_slot')}")
+        elif correction_meta.get("forced_slot"):
+            print(f"forced_slot={correction_meta.get('forced_slot')}")
         depth_diag = camera.analyze_depth_roi(depth, target.bbox)
         print(f"Depth debug target: {json.dumps(depth_diag, ensure_ascii=True)}")
 

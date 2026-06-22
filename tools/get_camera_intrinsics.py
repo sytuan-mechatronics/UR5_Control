@@ -26,7 +26,7 @@ except ImportError:
         SDK = None
 
 
-def get_intrinsics_pyorbbecsdk(transport="auto", ip=""):
+def get_intrinsics_pyorbbecsdk(transport="auto", ip="", net_port=8090):
     ctx = ob.Context()
     try:
         ctx.enable_net_device_enumeration(True)
@@ -53,7 +53,7 @@ def get_intrinsics_pyorbbecsdk(transport="auto", ip=""):
         break
 
     if device is None and transport == "lan" and ip:
-        device = ctx.create_net_device(ip, 8090)
+        device = ctx.create_net_device(ip, net_port)
 
     if device is None:
         raise RuntimeError("Không phát hiện thiết bị Orbbec phù hợp")
@@ -82,6 +82,7 @@ def parse_args():
         default=config.CAMERA_TRANSPORT,
     )
     parser.add_argument("--ip", default=config.CAMERA_IP, help="IP camera khi dùng LAN")
+    parser.add_argument("--port", type=int, default=config.CAMERA_NET_PORT, help="Port camera khi dùng LAN")
     return parser.parse_args()
 
 
@@ -89,7 +90,7 @@ def main():
     args = parse_args()
     if SDK in {"ob", "pyorbbecsdk"}:
         try:
-            intr = get_intrinsics_pyorbbecsdk(args.transport, args.ip)
+            intr = get_intrinsics_pyorbbecsdk(args.transport, args.ip, args.port)
         except Exception as exc:
             print(f"[LỖI] Không lấy được intrinsics từ Orbbec SDK: {exc}")
             sys.exit(1)

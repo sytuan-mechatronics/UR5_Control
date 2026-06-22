@@ -17,6 +17,7 @@ from robot.dashboard_client import DashboardClient
 from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
 from vision.calibration import (
+    apply_pick_correction,
     clamp_pick_z_sequence,
     camera_origin_to_base,
     camera_to_base,
@@ -415,11 +416,10 @@ class PickPlaceCycle:
                             self._log("Timestamp sync OK: delta={:.1f}ms".format(ts_diff * 1000.0))
 
                         p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
-                        p_base = [
-                            p_base_raw[0] + config.PICK_OFFSET_X,
-                            p_base_raw[1] + config.PICK_OFFSET_Y,
-                            p_base_raw[2] + config.PICK_OFFSET_Z,
-                        ]
+                        p_base, correction_meta = apply_pick_correction(
+                            p_base_raw,
+                            pick_uv=[u, v],
+                        )
                         self._log(
                             "DepthDebugTarget: {}".format(
                                 json.dumps(
@@ -429,13 +429,12 @@ class PickPlaceCycle:
                             )
                         )
                         self._log(
-                            "PickOffset: raw_base={}, offset={}, final_base={}".format(
+                            "PickOffset: raw_base={}, global_offset={}, local_offset={}, final_offset={}, mode={}, final_base={}".format(
                                 [round(float(v), 6) for v in p_base_raw],
-                                [
-                                    round(float(config.PICK_OFFSET_X), 6),
-                                    round(float(config.PICK_OFFSET_Y), 6),
-                                    round(float(config.PICK_OFFSET_Z), 6),
-                                ],
+                                [round(float(v), 6) for v in correction_meta.get("global_offset", [0.0, 0.0, 0.0])],
+                                [round(float(v), 6) for v in correction_meta.get("local_offset", [0.0, 0.0, 0.0])],
+                                [round(float(v), 6) for v in correction_meta.get("final_offset", [0.0, 0.0, 0.0])],
+                                correction_meta.get("mode", "unknown"),
                                 [round(float(v), 6) for v in p_base],
                             )
                         )
@@ -757,19 +756,17 @@ class PickPlaceCycle:
                     self._log("IntrinsicsWarning: {}".format(intr["reason"]))
                 p_cam = pixel_to_camera_3d(u, v, depth_mm, intr["fx"], intr["fy"], intr["cx"], intr["cy"])
                 p_base_raw = camera_to_base(p_cam, self.tcp_pose_at_capture, config.T_CAM_TO_TCP)
-                p_base = [
-                    p_base_raw[0] + config.PICK_OFFSET_X,
-                    p_base_raw[1] + config.PICK_OFFSET_Y,
-                    p_base_raw[2] + config.PICK_OFFSET_Z,
-                ]
+                p_base, correction_meta = apply_pick_correction(
+                    p_base_raw,
+                    pick_uv=[u, v],
+                )
                 self._log(
-                    "PickOffset: raw_base={}, offset={}, final_base={}".format(
+                    "PickOffset: raw_base={}, global_offset={}, local_offset={}, final_offset={}, mode={}, final_base={}".format(
                         [round(float(v), 6) for v in p_base_raw],
-                        [
-                            round(float(config.PICK_OFFSET_X), 6),
-                            round(float(config.PICK_OFFSET_Y), 6),
-                            round(float(config.PICK_OFFSET_Z), 6),
-                        ],
+                        [round(float(v), 6) for v in correction_meta.get("global_offset", [0.0, 0.0, 0.0])],
+                        [round(float(v), 6) for v in correction_meta.get("local_offset", [0.0, 0.0, 0.0])],
+                        [round(float(v), 6) for v in correction_meta.get("final_offset", [0.0, 0.0, 0.0])],
+                        correction_meta.get("mode", "unknown"),
                         [round(float(v), 6) for v in p_base],
                     )
                 )
