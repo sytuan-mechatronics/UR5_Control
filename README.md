@@ -1,14 +1,16 @@
 # UR5 Control Server (PC2)
 
-PC2 Flask server dieu khien UR5, camera Orbbec Femto Mega, YOLO detection, va gripper khi nhap qua REST API.
+PC2 Flask server dieu khien UR5 CB3, camera Orbbec Femto Mega (LAN/USB), YOLO detection, va pneumatic gripper qua REST API.
 
-Trang thai code hien tai:
+**Trang thai code (cap nhat 23/06/2026):**
 
 - Runtime chinh dang dung `PneumaticGripper` qua serial Arduino (`core/pneumatic_gripper.py`).
-- `robot/gripper_rg.py` van con trong repo nhu code tham khao / duong lui cho OnRobot RG, nhung khong phai runtime mac dinh.
-- Robot clients (`Dashboard`, `URScript`, `RTDE`) duoc tao 1 lan, tai su dung giua cac jobs, va co reconnect logic.
+- Camera ho tro ca USB va **LAN transport** (qua gigabit switch). Fix stale stream tren LAN da ap dung (skip FULL_FRAME_REQUIRE + flush buffer).
+- Phase 3 co vong lap pick-place tu dong cho den khi khay rong (detect=0), voi exclusion list vi tri da gap va in-place retry.
+- Robot clients (`Dashboard`, `URScript`, `RTDE`) duoc tao 1 lan, tai su dung giua cac jobs, co reconnect logic.
 - Camera intrinsics co the duoc nap tu `camera_intrinsics.json` neu file ton tai.
 - Hand-eye calibration mac dinh da duoc cap nhat bang ket qua do thuc te.
+- `robot/gripper_rg.py` van con trong repo nhu code tham khao cho OnRobot RG, nhung khong phai runtime mac dinh.
 
 Muc tieu he thong: PC1 goi REST API sang PC2, PC2 thuc thi job pick-place theo cac muc thu nghiem an toan tu stage 1 den stage 3.
 
@@ -495,30 +497,39 @@ Muc dich:
 - pick-place 1 phoi de xac nhan he thong truoc khi chay phase 3 (5 phoi)
 - tien de de tich hop voi MiR
 
-### Stage 3 - full flow
+### Stage 3 - full loop nhieu phoi
 
 Luong chinh:
 
 - open gripper
 - home -> scan approach -> scan pose
-- initial scan dem tong so phoi
-- moi lan pick:
-  - scan lai + doc tcp timestamp gan frame timestamp
-  - select target tot nhat
-  - lay depth tin cay
-  - transform sang `p_base`
-  - build `approach_pose` va `final_pose`
-  - move approach -> descend -> close gripper
-  - neu fail, retry toi da `MAX_PICK_RETRIES`
-  - move place approach -> place point -> retreat
-- cuoi chu trinh return home
+- vong lap `for cycle in range(MAX_PICK_CYCLES)`:
+  - settle sleep + flush LAN buffer + chup frame moi
+  - YOLO detect; neu detect=0 -> ket thuc "khay rong"
+  - loai tru vi tri da gap thanh cong (picked_uvs exclusion list, radius 100px)
+  - neu sau loai tru = 0 -> ket thuc "tat ca da gap"
+  - select target tot nhat + transform sang `p_base`
+  - quick retry grip toi da `MAX_PICK_RETRIES=3` lan:
+    - approach -> descend -> grip
+    - neu grip fail: retreat + open -> thu lai
+  - neu het retry van fail: quay ve scan pose, rescan fresh (KHONG mark da gap)
+  - neu grip OK: them vao picked_uvs, place, quay ve scan pose
+- return home
+
+Cac bien dieu chinh chinh:
+
+- `MAX_PICK_RETRIES`: so lan thu lai grip tai 1 vi tri (default 3)
+- `MAX_PICK_CYCLES`: safety ceiling (default 20)
+- `SCAN_SETTLE_SLEEP_S`: doi them sau wait_steady truoc khi chup (default 0.3s)
+- `PICKED_EXCLUSION_RADIUS_PX`: ban kinh loai tru vi tri da gap (default 100px)
+- `CAMERA_LAN_WARMUP_FRAMES`: so frame drain buffer LAN truoc capture (default 2)
 
 Co cap nhat vao job store:
 
 - `phase`
 - `parts_found`
 - `parts_picked`
-- log chi tiet
+- log chi tiet theo tung cycle
 
 ## 10. Callback ve PC1
 
@@ -639,9 +650,17 @@ Tool phan cung day du hon:
 
 ### Stage 2/3 co detection nhung target_pose sai
 
-- so sanh timestamp camera va RTDE
+- so sanh timestamp camera va RTDE (delta phai < 100ms)
+- tang `SCAN_SETTLE_SLEEP_S` va `CAMERA_LAN_WARMUP_FRAMES` trong `.env`
 - xac minh TCP tai luc chup frame
 - xac minh `camera_intrinsics.json` co dung resolution thuc te
+
+### Camera LAN stale / FPS thap
+
+- kiem tra NIC speed: `ethtool <iface> | grep Speed` (phai la 1000Mb/s)
+- kiem tra PoE injector cap du nguon (>= 15W)
+- giam `CAMERA_LAN_FPS=8` trong `.env` neu can
+- tang `CAMERA_LAN_WAIT_TIMEOUT_MS=700`
 
 ## 13. Luu y van hanh an toan
 
@@ -658,6 +677,8 @@ Tool phan cung day du hon:
 - `ARCHITECTURE.md`
 - `DEPLOYMENT.md`
 - `PARAMETERS_CHECKLIST.md`
+- `TEST_PROCEDURES.md` — quy trinh test day du Stage 1/2/3
+- `ISSUES_2026_06_23.md` — tong hop van de va fix ngay 23/06/2026 (LAN camera + Phase 3 loop)
 
 ## License
 

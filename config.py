@@ -186,6 +186,14 @@ GRIPPER_WIDTH_TOLERANCE_MM = float(os.getenv("GRIPPER_WIDTH_TOLERANCE_MM", "5"))
 # ==================== RETRY LOGIC ====================
 
 MAX_PICK_RETRIES = int(os.getenv("MAX_PICK_RETRIES", "3"))
+# Max outer pick cycles (safety ceiling — loop normally ends when tray is empty).
+MAX_PICK_CYCLES = int(os.getenv("MAX_PICK_CYCLES", "20"))
+# Extra sleep after wait_steady() before flushing camera and capturing scan frame.
+# Gives the camera pipeline time to buffer frames taken when robot was stationary.
+SCAN_SETTLE_SLEEP_S = float(os.getenv("SCAN_SETTLE_SLEEP_S", "0.3"))
+# Pixel radius around a successfully picked UV to exclude from future scans.
+# Prevents re-picking the same empty slot due to residual detection.
+PICKED_EXCLUSION_RADIUS_PX = int(os.getenv("PICKED_EXCLUSION_RADIUS_PX", "100"))
 
 
 # ==================== YOLO DETECTION ====================
@@ -215,10 +223,15 @@ CAMERA_USB_COLOR_FORMATS = [
     for x in os.getenv("CAMERA_USB_COLOR_FORMATS", "RGB,BGR,MJPG,YUYV,NV12,NV21,I420").split(",")
     if x.strip()
 ]
-CAMERA_LAN_WAIT_TIMEOUT_MS = int(os.getenv("CAMERA_LAN_WAIT_TIMEOUT_MS", "250"))
+CAMERA_LAN_WAIT_TIMEOUT_MS = int(os.getenv("CAMERA_LAN_WAIT_TIMEOUT_MS", "500"))
 CAMERA_USB_WAIT_TIMEOUT_MS = int(os.getenv("CAMERA_USB_WAIT_TIMEOUT_MS", "1000"))
 CAMERA_LAN_FRAME_RETRIES = int(os.getenv("CAMERA_LAN_FRAME_RETRIES", "4"))
 CAMERA_USB_FRAME_RETRIES = int(os.getenv("CAMERA_USB_FRAME_RETRIES", "8"))
+# Frames to discard before each real capture to drain stale pipeline buffer on LAN transport.
+CAMERA_LAN_WARMUP_FRAMES = int(os.getenv("CAMERA_LAN_WARMUP_FRAMES", "2"))
+# LAN FPS profile. Default 15 to reduce SDK buffer pressure.
+# On a dedicated gigabit link you can raise this to 30.
+CAMERA_LAN_FPS = int(os.getenv("CAMERA_LAN_FPS", "15"))
 DEPTH_HOLE_FILL = os.getenv("DEPTH_HOLE_FILL", "True").lower() == "true"
 DEPTH_WINDOW_HALF = int(os.getenv("DEPTH_WINDOW_HALF", "2"))
 DEPTH_INNER_MARGIN_RATIO = float(os.getenv("DEPTH_INNER_MARGIN_RATIO", "0.22"))

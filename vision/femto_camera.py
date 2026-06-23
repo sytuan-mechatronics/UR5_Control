@@ -325,6 +325,11 @@ class FemtoCamera:
                 else "usb"
             )
 
+            # On LAN, lower FPS to reduce bandwidth and prevent stream stall.
+            if self._is_lan_mode():
+                self.fps = int(config.CAMERA_LAN_FPS)
+                logger.info("LAN transport detected: using %dfps profile (CAMERA_LAN_FPS)", self.fps)
+
             # Create pipeline
             self.pipeline = ob.Pipeline(device)
 
@@ -416,21 +421,24 @@ class FemtoCamera:
             except Exception as e:
                 logger.warning(f"Could not set align mode: {e}")
 
-            # Prefer full frame set (color+depth together) when SDK supports it.
-            try:
-                full_frame_require = _enum_value(
-                    ob,
-                    ["FrameAggregateOutputMode", "OBFrameAggregateOutputMode"],
-                    ["FULL_FRAME_REQUIRE"],
-                )
-                if full_frame_require is not None:
-                    _call_any(
-                        self.config,
-                        ["set_frame_aggregate_output_mode", "setFrameAggregateOutputMode"],
-                        full_frame_require,
+            # On LAN, skip FULL_FRAME_REQUIRE: it waits for both color+depth to arrive
+            # simultaneously, causing multi-second stalls when packets arrive out of sync.
+            # On USB the latency is negligible so FULL_FRAME_REQUIRE is safe.
+            if not self._is_lan_mode():
+                try:
+                    full_frame_require = _enum_value(
+                        ob,
+                        ["FrameAggregateOutputMode", "OBFrameAggregateOutputMode"],
+                        ["FULL_FRAME_REQUIRE"],
                     )
-            except Exception as e:
-                logger.warning(f"Could not set frame aggregate mode: {e}")
+                    if full_frame_require is not None:
+                        _call_any(
+                            self.config,
+                            ["set_frame_aggregate_output_mode", "setFrameAggregateOutputMode"],
+                            full_frame_require,
+                        )
+                except Exception as e:
+                    logger.warning(f"Could not set frame aggregate mode: {e}")
 
             # Start pipeline
             self.pipeline.start(self.config)
@@ -476,17 +484,25 @@ class FemtoCamera:
             raise RuntimeError("Camera not connected")
 
         try:
-            # Wait for frameset with retries; camera often needs warmup cycles.
+            # Wait for a frameset that has both color and depth.
+            # On LAN without FULL_FRAME_REQUIRE, framesets may arrive with only one
+            # stream populated — keep retrying until both are present.
             frameset = None
+            depth_frame_check = None
             wait_timeout_ms = self._wait_timeout_ms()
             for _ in range(self._frame_retries()):
-                frameset = _call_any(
+                candidate = _call_any(
                     self.pipeline,
                     ["wait_for_frames", "waitForFrames"],
                     wait_timeout_ms,
                 )
-                if frameset:
+                if not candidate:
+                    continue
+                depth_frame_check = _call_any(candidate, ["get_depth_frame", "getDepthFrame"])
+                if depth_frame_check is not None:
+                    frameset = candidate
                     break
+                frameset = candidate  # keep last non-None even if depth missing
             if not frameset:
                 raise RuntimeError("No frames received from camera after retries")
 
@@ -545,6 +561,23 @@ class FemtoCamera:
         # Ghi timestamp NGAY SAU khi nhận frame, trước bất kỳ xử lý nào
         timestamp_s = time.time()
         return rgb, depth, timestamp_s
+
+    def flush_stale_frames(self, n: int = 2) -> None:
+        """Drain up to n buffered frames on LAN transport before a real capture.
+
+        On LAN the pipeline accumulates frames in an internal buffer. Draining them
+        ensures the next get_aligned_frames() returns a frame captured after this call,
+        preventing stale coordinate transforms when the robot is stationary at scan pose.
+        No-op on USB (low-latency, buffer age is negligible).
+        """
+        if not self.pipeline or not self._is_lan_mode():
+            return
+        flush_timeout_ms = min(self._wait_timeout_ms(), 150)
+        for _ in range(n):
+            try:
+                _call_any(self.pipeline, ["wait_for_frames", "waitForFrames"], flush_timeout_ms)
+            except Exception:
+                break
 
     def get_reliable_depth(
         self,

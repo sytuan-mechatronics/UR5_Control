@@ -330,6 +330,7 @@ class PickPlaceCycle:
             self._check_abort()
 
             self._set_phase("phase2_vision_detect")
+            self.camera.flush_stale_frames(n=config.CAMERA_LAN_WARMUP_FRAMES)
             rgb, depth, cam_ts = self.camera.get_frames_with_timestamp()
             tcp_pose_at_capture, rtde_ts = self.rtde.get_tcp_pose_with_timestamp()
             detections = self.detector.detect(rgb)
@@ -444,6 +445,7 @@ class PickPlaceCycle:
                             config.PICK_APPROACH_OFFSET_Z,
                             config.PICK_FINAL_OFFSET_Z + config.GRASP_Z_OFFSET,
                             config.PICK_RETREAT_OFFSET_Z,
+                            min_descent_mm=config.PICK_MIN_DESCENT_M * 1000.0,
                         )
                         approach_pose = [
                             p_base[0],
@@ -628,52 +630,66 @@ class PickPlaceCycle:
             self._wait_steady_default()
             self._log("At scan position")
 
-            self._set_phase("initial_scan")
-            self._log("Capturing initial scan...")
-            rgb, depth, _ = self.camera.get_frames_with_timestamp()
-            detections = self.detector.detect(rgb)
-
-            parts_found = len(detections)
-            self.job_store.update_job(self.job_id, parts_found=parts_found)
-            self._log("Found {} part(s)".format(parts_found))
-
-            if parts_found == 0:
-                self._set_phase("no_parts_found")
-                self._log("No parts found, cycle complete")
-                self.job_store.update_job(self.job_id, status="done")
-                return {
-                    "status": "success",
-                    "stage": "Phase 3 completed",
-                    "experiment_stage": 3,
-                    "experiment_label": stage_label,
-                    "detected_objects": 0,
-                    "parts_found": 0,
-                    "parts_picked": 0,
-                }
-
+            # picked_uvs: image-space (u,v) of successfully picked parts.
+            # Used to filter out already-empty slots on subsequent scans so the robot
+            # never tries to pick the same location twice after a successful grip.
             parts_picked = 0
+            picked_uvs = []
             frame_center_uv = (config.CAMERA_WIDTH / 2.0, config.CAMERA_HEIGHT / 2.0)
+            excl_radius_px = float(config.PICKED_EXCLUSION_RADIUS_PX)
 
-            for pick_attempt in range(parts_found):
+            for pick_cycle in range(config.MAX_PICK_CYCLES):
                 self._check_abort()
+                self._set_phase("scan_cycle_{}".format(pick_cycle))
+                self._log("--- Scan cycle {} ---".format(pick_cycle + 1))
 
-                self._set_phase("scanning_before_pick_{}".format(pick_attempt))
-                self._log("Scanning for pick #{}...".format(pick_attempt + 1))
-
+                # Let robot fully damp any residual vibration, then flush stale camera
+                # buffer so the next frame reflects the robot's current stationary pose.
+                if config.SCAN_SETTLE_SLEEP_S > 0:
+                    time.sleep(config.SCAN_SETTLE_SLEEP_S)
+                self.camera.flush_stale_frames(n=config.CAMERA_LAN_WARMUP_FRAMES)
                 rgb, depth, cam_ts = self.camera.get_frames_with_timestamp()
                 self.tcp_pose_at_capture, rtde_ts = self.rtde.get_tcp_pose_with_timestamp()
 
                 ts_diff = abs(cam_ts - rtde_ts)
                 if ts_diff > 0.1:
                     logger.warning(
-                        "Frame/pose timestamp mismatch: %.3fs - robot may have moved between capture and pose read",
-                        ts_diff,
+                        "Frame/pose timestamp mismatch: %.3fs", ts_diff
                     )
                     self._log("WARNING: frame/pose lech {:.0f}ms".format(ts_diff * 1000.0))
+                else:
+                    self._log("Timestamp OK: {:.1f}ms".format(ts_diff * 1000.0))
 
                 detections = self.detector.detect(rgb)
+                self.job_store.update_job(self.job_id, parts_found=len(detections))
+                self._log("Detected {} part(s) in tray".format(len(detections)))
+
                 if not detections:
-                    self._log("No more parts detected, ending cycle")
+                    self._log("Tray empty — cycle complete")
+                    break
+
+                # Exclude positions already picked this session (stale detections on empty slots).
+                if picked_uvs:
+                    fresh = []
+                    for det in detections:
+                        du, dv = det.center
+                        near_picked = any(
+                            math.hypot(du - pu, dv - pv) < excl_radius_px
+                            for pu, pv in picked_uvs
+                        )
+                        if not near_picked:
+                            fresh.append(det)
+                    n_filtered = len(detections) - len(fresh)
+                    if n_filtered:
+                        self._log(
+                            "Excluded {} already-picked slot(s), {} fresh target(s) remain".format(
+                                n_filtered, len(fresh)
+                            )
+                        )
+                    detections = fresh
+
+                if not detections:
+                    self._log("All detected positions were already picked — tray clear")
                     break
 
                 target = self.detector.select_best_target(detections, depth, frame_center_uv)
@@ -692,17 +708,15 @@ class PickPlaceCycle:
                                 )
                             )
                         )
-                    self._log("No valid target with depth, skipping")
+                    self._log("No valid depth on any candidate — rescanning next cycle")
                     continue
 
                 target = self.detector.refine_pick_point(rgb, target, depth)
-                self._log("Target selected: {} @ {}".format(target.label, target.bbox))
-
-                u, v = target.pick_point
+                pick_u, pick_v = target.pick_point
                 depth_mm, depth_bbox = self.detector.resolve_pick_depth(depth, target)
 
                 if depth_mm <= 0:
-                    self._log("No valid depth for target, skipping")
+                    self._log("Depth=0 at pick point — rescanning next cycle")
                     continue
 
                 raw_depth_mm = depth_mm
@@ -713,25 +727,18 @@ class PickPlaceCycle:
                 )
                 if was_clamped:
                     self._log(
-                        "WARNING: depth {:.1f}mm < camera->TCP standoff, clamp -> {:.1f}mm "
-                        "de tranh robot di nguoc len".format(
-                            raw_depth_mm,
-                            min_safe_depth_mm,
+                        "WARNING: depth {:.1f}mm < standoff, clamp -> {:.1f}mm".format(
+                            raw_depth_mm, min_safe_depth_mm
                         )
                     )
 
                 self._log(
-                    "Target detail: center=({:.1f},{:.1f}), pick=({:.1f},{:.1f}), depth={:.1f}mm, source={}, depth_bbox={}".format(
-                        target.center[0],
-                        target.center[1],
-                        u,
-                        v,
-                        depth_mm,
-                        target.pick_source,
-                        depth_bbox,
+                    "Target: center=({:.1f},{:.1f}), pick=({:.1f},{:.1f}), "
+                    "depth={:.1f}mm, source={}, depth_bbox={}".format(
+                        target.center[0], target.center[1],
+                        pick_u, pick_v, depth_mm, target.pick_source, depth_bbox,
                     )
                 )
-                self._log("Target depth: {:.1f}mm".format(depth_mm))
                 self._log(
                     "DepthDebugTarget: {}".format(
                         json.dumps(
@@ -743,31 +750,27 @@ class PickPlaceCycle:
 
                 frame_h, frame_w = depth.shape
                 intr = resolve_intrinsics_for_frame(
-                    frame_w,
-                    frame_h,
-                    config.CAM_FX,
-                    config.CAM_FY,
-                    config.CAM_CX,
-                    config.CAM_CY,
-                    config.CAM_CALIB_WIDTH,
-                    config.CAM_CALIB_HEIGHT,
+                    frame_w, frame_h,
+                    config.CAM_FX, config.CAM_FY, config.CAM_CX, config.CAM_CY,
+                    config.CAM_CALIB_WIDTH, config.CAM_CALIB_HEIGHT,
                 )
                 if intr["reason"]:
                     self._log("IntrinsicsWarning: {}".format(intr["reason"]))
-                p_cam = pixel_to_camera_3d(u, v, depth_mm, intr["fx"], intr["fy"], intr["cx"], intr["cy"])
+
+                p_cam = pixel_to_camera_3d(
+                    pick_u, pick_v, depth_mm,
+                    intr["fx"], intr["fy"], intr["cx"], intr["cy"],
+                )
                 p_base_raw = camera_to_base(p_cam, self.tcp_pose_at_capture, config.T_CAM_TO_TCP)
                 p_base, correction_meta = apply_pick_correction(
-                    p_base_raw,
-                    pick_uv=[u, v],
+                    p_base_raw, pick_uv=[pick_u, pick_v]
                 )
                 self._log(
-                    "PickOffset: raw_base={}, global_offset={}, local_offset={}, final_offset={}, mode={}, final_base={}".format(
-                        [round(float(v), 6) for v in p_base_raw],
-                        [round(float(v), 6) for v in correction_meta.get("global_offset", [0.0, 0.0, 0.0])],
-                        [round(float(v), 6) for v in correction_meta.get("local_offset", [0.0, 0.0, 0.0])],
-                        [round(float(v), 6) for v in correction_meta.get("final_offset", [0.0, 0.0, 0.0])],
-                        correction_meta.get("mode", "unknown"),
-                        [round(float(v), 6) for v in p_base],
+                    "PickOffset: raw={}, offset={}, mode={}, final={}".format(
+                        [round(float(x), 6) for x in p_base_raw],
+                        [round(float(x), 6) for x in correction_meta.get("final_offset", [0, 0, 0])],
+                        correction_meta.get("mode", "?"),
+                        [round(float(x), 6) for x in p_base],
                     )
                 )
 
@@ -777,109 +780,141 @@ class PickPlaceCycle:
                     config.PICK_APPROACH_OFFSET_Z,
                     config.PICK_FINAL_OFFSET_Z + config.GRASP_Z_OFFSET,
                     config.PICK_RETREAT_OFFSET_Z,
+                    min_descent_mm=config.PICK_MIN_DESCENT_M * 1000.0,
                 )
                 approach_pose = [
-                    p_base[0],
-                    p_base[1],
-                    approach_z,
-                    config.TOOL_DOWN_RX,
-                    config.TOOL_DOWN_RY,
-                    config.TOOL_DOWN_RZ,
+                    p_base[0], p_base[1], approach_z,
+                    config.TOOL_DOWN_RX, config.TOOL_DOWN_RY, config.TOOL_DOWN_RZ,
                 ]
                 final_pose = [
-                    p_base[0],
-                    p_base[1],
-                    final_z,
-                    config.TOOL_DOWN_RX,
-                    config.TOOL_DOWN_RY,
-                    config.TOOL_DOWN_RZ,
+                    p_base[0], p_base[1], final_z,
+                    config.TOOL_DOWN_RX, config.TOOL_DOWN_RY, config.TOOL_DOWN_RZ,
                 ]
-                self._validate_pick_motion(
-                    self.tcp_pose_at_capture,
-                    approach_pose,
-                    final_pose,
-                )
 
-                self._log("Pick pose: {}".format(approach_pose))
+                try:
+                    self._validate_pick_motion(self.tcp_pose_at_capture, approach_pose, final_pose)
+                except RuntimeError as val_err:
+                    self._log("Validation failed: {} — rescanning next cycle".format(val_err))
+                    continue
 
+                self._log("approach_pose={}".format(approach_pose))
+                self._log("final_pose={}".format(final_pose))
+
+                # Quick in-place retries (same stale coordinates).
+                # If all fail: retreat to scan pose and let the outer loop rescan with
+                # fresh coordinates — do NOT add to picked_uvs so the part is retried.
                 grip_success = False
-                for retry in range(config.MAX_PICK_RETRIES):
+                for quick_retry in range(config.MAX_PICK_RETRIES):
                     self._check_abort()
+                    if quick_retry > 0:
+                        self._log("Quick retry {}/{}...".format(quick_retry + 1, config.MAX_PICK_RETRIES))
 
-                    if retry > 0:
-                        self._log("Retry pick #{}/{}".format(retry + 1, config.MAX_PICK_RETRIES))
-
-                    self._set_phase("moving_to_pick_approach_{}_retry_{}".format(pick_attempt, retry))
+                    self._set_phase("approach_c{}_r{}".format(pick_cycle, quick_retry))
                     self._log("Moving to pick approach...")
-                    self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                    self._move_linear_runtime(
+                        approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL
+                    )
                     self._wait_steady_default()
-                    self._log("At pick approach")
 
-                    self._set_phase("picking_{}_retry_{}".format(pick_attempt, retry))
+                    self._set_phase("pick_c{}_r{}".format(pick_cycle, quick_retry))
                     self._log("Descending to part...")
-                    self._move_linear_runtime(final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+                    self._move_linear_runtime(
+                        final_pose, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL
+                    )
                     time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
                     self._wait_steady_default()
-                    self._log("At part surface")
 
-                    self._log("Gripping part...")
                     try:
                         self._gripper_close()
-                        self._log("Part gripped successfully")
+                        self._log("Grip OK")
                         grip_success = True
                         break
                     except RuntimeError as grip_err:
-                        self._log("Grip attempt {} failed: {}".format(retry + 1, grip_err))
-                        if retry < config.MAX_PICK_RETRIES - 1:
-                            self._log("Retreating to retry...")
-                            self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
-                            self._wait_steady_default()
-                            self._gripper_open()
-                            time.sleep(0.3)
-                        else:
-                            raise RuntimeError("Grip failed after {} retries".format(config.MAX_PICK_RETRIES))
+                        self._log("Grip attempt {} failed: {}".format(quick_retry + 1, grip_err))
+                        self._move_linear_runtime(
+                            approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL
+                        )
+                        self._wait_steady_default()
+                        self._gripper_open()
+                        time.sleep(0.3)
 
                 if not grip_success:
-                    continue
+                    # All quick retries failed: return to scan pose so next cycle captures
+                    # fresh coordinates for the same part.
+                    self._log(
+                        "All {} quick retries failed — retreating to scan pose for fresh rescan".format(
+                            config.MAX_PICK_RETRIES
+                        )
+                    )
+                    self._set_phase("retreat_to_scan_c{}".format(pick_cycle))
+                    self._move_joint_runtime(
+                        config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
+                    )
+                    self._wait_steady_default()
+                    self._move_joint_runtime(
+                        config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
+                    )
+                    self._wait_steady_default()
+                    continue  # do NOT add to picked_uvs
 
-                self._set_phase("retreating_after_pick_{}".format(pick_attempt))
+                # Grip succeeded: add UV to exclusion list so this slot is ignored next scan.
+                picked_uvs.append((pick_u, pick_v))
+                self._log(
+                    "Gripped OK — UV ({:.0f},{:.0f}) added to exclusion list, total={}".format(
+                        pick_u, pick_v, parts_picked + 1
+                    )
+                )
+
+                self._set_phase("retreat_c{}".format(pick_cycle))
                 self._log("Retreating with part...")
-                self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._move_linear_runtime(
+                    approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL
+                )
                 self._wait_steady_default()
-                self._log("Part retreated safely")
 
-                self._set_phase("moving_to_place_{}".format(pick_attempt))
+                self._set_phase("place_approach_c{}".format(pick_cycle))
                 self._log("Moving to place position...")
-                self._move_linear_runtime(config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._move_linear_runtime(
+                    config.PLACE_APPROACH_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL
+                )
                 self._wait_steady_default()
-                self._log("At place approach")
 
                 self._log("Descending to conveyor...")
-                self._move_linear_runtime(config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL)
+                self._move_linear_runtime(
+                    config.PLACE_POINT_CART, accel=config.LINEAR_ACCEL, vel=config.PICK_APPROACH_VEL
+                )
                 time.sleep(config.CB3_MOTION_PRE_WAIT_SLEEP_S)
                 self._wait_steady_default()
-                self._log("At conveyor")
 
-                self._set_phase("placing_{}".format(pick_attempt))
+                self._set_phase("place_c{}".format(pick_cycle))
                 self._log("Releasing part...")
                 self._gripper_open()
                 time.sleep(0.3)
-                self._log("Part released")
+                self._log("Part placed on conveyor")
 
-                self._set_phase("retreating_after_place_{}".format(pick_attempt))
+                self._set_phase("place_retreat_c{}".format(pick_cycle))
                 self._log("Retreating from conveyor...")
-                self._move_linear_runtime(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
+                self._move_linear_runtime(
+                    config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL
+                )
                 self._wait_steady_default()
-                self._log("Safe retreat")
 
                 parts_picked += 1
                 self.job_store.update_job(self.job_id, parts_picked=parts_picked)
+                self._log("Part placed — total picked: {}".format(parts_picked))
 
+                # Return to scan pose for next cycle
+                self._set_phase("return_to_scan_c{}".format(pick_cycle))
                 self._log("Returning to scan position...")
-                self._move_joint_runtime(config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._move_joint_runtime(
+                    config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
+                )
                 self._wait_steady_default()
-                self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
+                self._move_joint_runtime(
+                    config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
+                )
                 self._wait_steady_default()
+                self._log("At scan position")
 
             self._set_phase("returning_home")
             self._log("Returning to home...")
@@ -888,7 +923,7 @@ class PickPlaceCycle:
             self._log("At home")
 
             self._set_phase("done")
-            self._log("Cycle complete: {}/{} parts picked".format(parts_picked, parts_found))
+            self._log("Cycle complete: {} part(s) picked".format(parts_picked))
             self.job_store.update_job(self.job_id, status="done")
 
             return {
@@ -896,8 +931,8 @@ class PickPlaceCycle:
                 "stage": "Phase 3 completed",
                 "experiment_stage": 3,
                 "experiment_label": stage_label,
-                "detected_objects": parts_found,
-                "parts_found": parts_found,
+                "detected_objects": len(picked_uvs),
+                "parts_found": len(picked_uvs),
                 "parts_picked": parts_picked,
             }
 

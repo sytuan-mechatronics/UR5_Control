@@ -283,6 +283,9 @@ class OrbbecBackend:
             if self._is_lan_mode()
             else int(config.CAMERA_USB_FRAME_RETRIES)
         )
+        if self._is_lan_mode():
+            self.fps = int(config.CAMERA_LAN_FPS)
+            print(f"  LAN mode: dung {self.fps}fps profile (CAMERA_LAN_FPS)")
 
         self._pipeline = ob.Pipeline(selected_device)
         self._config   = ob.Config()
@@ -305,12 +308,15 @@ class OrbbecBackend:
         if align_mode is not None:
             self._config.set_align_mode(align_mode)
 
-        try:
-            agg_mode = getattr(ob, "OBFrameAggregateOutputMode", None)
-            if agg_mode is not None and hasattr(agg_mode, "FULL_FRAME_REQUIRE"):
-                self._config.set_frame_aggregate_output_mode(agg_mode.FULL_FRAME_REQUIRE)
-        except Exception:
-            pass
+        # Skip FULL_FRAME_REQUIRE on LAN: waits for both streams simultaneously,
+        # causing multi-second stalls when color/depth packets arrive out of sync.
+        if not self._is_lan_mode():
+            try:
+                agg_mode = getattr(ob, "OBFrameAggregateOutputMode", None)
+                if agg_mode is not None and hasattr(agg_mode, "FULL_FRAME_REQUIRE"):
+                    self._config.set_frame_aggregate_output_mode(agg_mode.FULL_FRAME_REQUIRE)
+            except Exception:
+                pass
 
         self._pipeline.start(self._config)
 
