@@ -554,3 +554,13 @@ URSCRIPT_TIMEOUT = float(os.getenv("URSCRIPT_TIMEOUT", "10.0"))  # s
 # ==================== LOGGING ====================
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+
+# ==================== RESULTS LOGGING ====================
+
+RESULTS_DIR                  = os.getenv("RESULTS_DIR",                  "results")
+RESULTS_JOB_SUMMARY_CSV      = os.getenv("RESULTS_JOB_SUMMARY_CSV",      "results/job_summary.csv")
+RESULTS_PICK_DETECTIONS_CSV  = os.getenv("RESULTS_PICK_DETECTIONS_CSV",  "results/pick_detections.csv")
+# Fixed pick target per job — used as success rate denominator.
+# Change in .env if tray capacity differs.
+PICK_TARGET_COUNT            = int(os.getenv("PICK_TARGET_COUNT",         "5"))

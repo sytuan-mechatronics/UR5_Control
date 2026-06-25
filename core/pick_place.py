@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 import config
 from core.job_store import JobStore
+from core.job_logger import job_result_logger as _job_logger
 from core.pneumatic_gripper import PneumaticGripper, GripperError
 from robot.dashboard_client import DashboardClient
 from robot.rtde_client import RTDEClient
@@ -630,6 +631,14 @@ class PickPlaceCycle:
             self._wait_steady_default()
             self._log("At scan position")
 
+            _job_logger.start_job(
+                self.job_id,
+                created_at=job_snapshot.get("created_at", time.time()),
+                station=job_snapshot.get("station", ""),
+                workflow_id=job_snapshot.get("workflow_id", ""),
+                experiment_stage=stage,
+            )
+
             # picked_uvs: image-space (u,v) of successfully picked parts.
             # Used to filter out already-empty slots on subsequent scans so the robot
             # never tries to pick the same location twice after a successful grip.
@@ -663,6 +672,8 @@ class PickPlaceCycle:
                 detections = self.detector.detect(rgb)
                 self.job_store.update_job(self.job_id, parts_found=len(detections))
                 self._log("Detected {} part(s) in tray".format(len(detections)))
+                if pick_cycle == 0:
+                    _job_logger.set_first_scan_count(self.job_id, len(detections))
 
                 if not detections:
                     self._log("Tray empty — cycle complete")
@@ -804,6 +815,7 @@ class PickPlaceCycle:
                 # If all fail: retreat to scan pose and let the outer loop rescan with
                 # fresh coordinates — do NOT add to picked_uvs so the part is retried.
                 grip_success = False
+                _retries_used = config.MAX_PICK_RETRIES
                 for quick_retry in range(config.MAX_PICK_RETRIES):
                     self._check_abort()
                     if quick_retry > 0:
@@ -828,6 +840,7 @@ class PickPlaceCycle:
                         self._gripper_close()
                         self._log("Grip OK")
                         grip_success = True
+                        _retries_used = quick_retry
                         break
                     except RuntimeError as grip_err:
                         self._log("Grip attempt {} failed: {}".format(quick_retry + 1, grip_err))
@@ -846,6 +859,11 @@ class PickPlaceCycle:
                             config.MAX_PICK_RETRIES
                         )
                     )
+                    _job_logger.record_pick(
+                        self.job_id, pick_cycle + 1,
+                        getattr(target, "confidence", 0.0), depth_mm,
+                        pick_u, pick_v, _retries_used, False,
+                    )
                     self._set_phase("retreat_to_scan_c{}".format(pick_cycle))
                     self._move_joint_runtime(
                         config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
@@ -859,6 +877,11 @@ class PickPlaceCycle:
 
                 # Grip succeeded: add UV to exclusion list so this slot is ignored next scan.
                 picked_uvs.append((pick_u, pick_v))
+                _job_logger.record_pick(
+                    self.job_id, pick_cycle + 1,
+                    getattr(target, "confidence", 0.0), depth_mm,
+                    pick_u, pick_v, _retries_used, True,
+                )
                 self._log(
                     "Gripped OK — UV ({:.0f},{:.0f}) added to exclusion list, total={}".format(
                         pick_u, pick_v, parts_picked + 1
@@ -925,6 +948,7 @@ class PickPlaceCycle:
             self._set_phase("done")
             self._log("Cycle complete: {} part(s) picked".format(parts_picked))
             self.job_store.update_job(self.job_id, status="done")
+            _job_logger.finalize(self.job_id, parts_picked)
 
             return {
                 "status": "success",
@@ -953,6 +977,7 @@ class PickPlaceCycle:
                 logger.error("Error during abort cleanup: %s", cleanup_err)
 
             self.job_store.update_job(self.job_id, status="aborted")
+            _job_logger.discard(self.job_id)
             raise
 
         except Exception as err:
@@ -960,6 +985,7 @@ class PickPlaceCycle:
             self._set_phase("error")
             self._log("Error: {}".format(err))
             self.job_store.update_job(self.job_id, status="error", error=str(err))
+            _job_logger.discard(self.job_id)
 
             try:
                 logger.info("Attempting cleanup after error...")
