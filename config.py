@@ -54,6 +54,17 @@ EXPERIMENT_STAGE_LABELS = {
 }
 
 
+# ==================== EXPERIMENT REPORT PATHS ====================
+
+RESULTS_DIR = os.getenv("RESULTS_DIR", "results")
+RESULTS_JOB_SUMMARY_CSV = os.path.join(RESULTS_DIR, "job_summary.csv")
+RESULTS_PICK_DETECTIONS_CSV = os.path.join(RESULTS_DIR, "pick_detections.csv")
+RESULTS_SCENARIO1_CSV = os.path.join(RESULTS_DIR, "scenario1_phase1.csv")
+RESULTS_SCENARIO2_CSV = os.path.join(RESULTS_DIR, "scenario2_phase2.csv")
+RESULTS_SCENARIO3_CSV = os.path.join(RESULTS_DIR, "scenario3_phase3.csv")
+PICK_TARGET_COUNT = int(os.getenv("PICK_TARGET_COUNT", "5"))
+
+
 # ==================== PC1 CALLBACK CONFIGURATION ====================
 
 PC1_BASE_URL = os.getenv("PC1_BASE_URL", "http://192.168.1.100:5000")
@@ -118,14 +129,26 @@ PICK_MAX_FINAL_Z_ABOVE_CAPTURE_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_CAPTU
 PICK_MAX_FINAL_Z_ABOVE_SCAN_M = float(os.getenv("PICK_MAX_FINAL_Z_ABOVE_SCAN_M", "0.005"))
 PICK_MIN_DESCENT_M = float(os.getenv("PICK_MIN_DESCENT_M", "0.02"))
 PICK_MIN_FINAL_BELOW_CAMERA_M = float(os.getenv("PICK_MIN_FINAL_BELOW_CAMERA_M", "0.02"))
-PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.066"))
-PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "0.080"))
-PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "-0.088"))
+PICK_OFFSET_X = float(os.getenv("PICK_OFFSET_X", "0.052"))
+PICK_OFFSET_Y = float(os.getenv("PICK_OFFSET_Y", "0.0765"))
+PICK_OFFSET_Z = float(os.getenv("PICK_OFFSET_Z", "0.0"))
 PICK_CORRECTION_ENABLED = os.getenv("PICK_CORRECTION_ENABLED", "False").lower() == "true"
 PICK_CORRECTION_MAP_PATH = os.getenv("PICK_CORRECTION_MAP_PATH", "pick_correction_map.json").strip()
 PICK_CORRECTION_STRATEGY = os.getenv("PICK_CORRECTION_STRATEGY", "pixel_slot").strip().lower()
 if PICK_CORRECTION_STRATEGY not in ("pixel_slot", "slot_only", "nearest", "idw"):
     PICK_CORRECTION_STRATEGY = "pixel_slot"
+TRAY_SLOT_REFERENCE_ENABLED = os.getenv("TRAY_SLOT_REFERENCE_ENABLED", "False").lower() == "true"
+TRAY_SLOT_REFERENCE_PATH = os.getenv("TRAY_SLOT_REFERENCE_PATH", "tray_slot_reference.json").strip()
+TRAY_SLOT_SCANPOSE_TOL_DEG = float(os.getenv("TRAY_SLOT_SCANPOSE_TOL_DEG", "3.0"))
+TRAY_SLOT_MATCH_MIN_DETECTIONS = int(os.getenv("TRAY_SLOT_MATCH_MIN_DETECTIONS", "2"))
+TRAY_SLOT_MATCH_MAX_ERROR_PX = float(os.getenv("TRAY_SLOT_MATCH_MAX_ERROR_PX", "80.0"))
+TRAY_SLOT_SINGLE_MATCH_MAX_ERROR_PX = float(os.getenv("TRAY_SLOT_SINGLE_MATCH_MAX_ERROR_PX", "120.0"))
+TRAY_SLOT_MATCH_SCALE_MIN = float(os.getenv("TRAY_SLOT_MATCH_SCALE_MIN", "0.7"))
+TRAY_SLOT_MATCH_SCALE_MAX = float(os.getenv("TRAY_SLOT_MATCH_SCALE_MAX", "1.3"))
+TRAY_SLOT_MATCH_MAX_ROT_DEG = float(os.getenv("TRAY_SLOT_MATCH_MAX_ROT_DEG", "35.0"))
+SINGLE_SLOT_REFERENCE_ENABLED = os.getenv("SINGLE_SLOT_REFERENCE_ENABLED", "False").lower() == "true"
+SINGLE_SLOT_REFERENCE_PATH = os.getenv("SINGLE_SLOT_REFERENCE_PATH", "single_slot_reference.json").strip()
+SINGLE_SLOT_MATCH_MAX_ERROR_PX = float(os.getenv("SINGLE_SLOT_MATCH_MAX_ERROR_PX", "90.0"))
 PICK_CORRECTION_NEIGHBORS = int(os.getenv("PICK_CORRECTION_NEIGHBORS", "4"))
 PICK_CORRECTION_POWER = float(os.getenv("PICK_CORRECTION_POWER", "2.0"))
 PICK_CORRECTION_EXACT_MM = float(os.getenv("PICK_CORRECTION_EXACT_MM", "3.0"))
@@ -427,9 +450,9 @@ def _parse_homogeneous_matrix(env_key: str, default: np.ndarray) -> np.ndarray:
 def _load_hand_eye_defaults() -> np.ndarray:
     """Load default T_cam_to_tcp from hand_eye_result.json when available."""
     fallback = np.array([
-        [0.9951500711354427, -0.044091332319025234, 0.08793344263395714, 0.1449751753706647],
-        [0.02209516212173082, 0.971268628037997, 0.23695792031499208, -0.10261883832654922],
-        [-0.09585478459597346, -0.2338657875866499, 0.9675322494193863, -0.4189851310270788],
+        [-0.966724, 0.212458, -0.142501, -0.086794],
+        [-0.210646, -0.977165, -0.027859, 0.022317],
+        [-0.145166, 0.003085, 0.989403, -0.15573],
         [0.0, 0.0, 0.0, 1.0],
     ], dtype=np.float64)
 
@@ -554,13 +577,3 @@ URSCRIPT_TIMEOUT = float(os.getenv("URSCRIPT_TIMEOUT", "10.0"))  # s
 # ==================== LOGGING ====================
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-
-# ==================== RESULTS LOGGING ====================
-
-RESULTS_DIR                  = os.getenv("RESULTS_DIR",                  "results")
-RESULTS_JOB_SUMMARY_CSV      = os.getenv("RESULTS_JOB_SUMMARY_CSV",      "results/job_summary.csv")
-RESULTS_PICK_DETECTIONS_CSV  = os.getenv("RESULTS_PICK_DETECTIONS_CSV",  "results/pick_detections.csv")
-# Fixed pick target per job — used as success rate denominator.
-# Change in .env if tray capacity differs.
-PICK_TARGET_COUNT            = int(os.getenv("PICK_TARGET_COUNT",         "5"))

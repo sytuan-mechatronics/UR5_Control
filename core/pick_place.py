@@ -28,6 +28,7 @@ from vision.calibration import (
 )
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
+from vision.tray_slot_reference import load_tray_slot_reference, resolve_selected_slot_for_target
 
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,23 @@ class PickPlaceCycle:
     def _wait_steady_cleanup(self) -> bool:
         return self.rtde.wait_steady(timeout_s=10.0, motion_start_timeout=10.0)
 
+    def _joint_max_error_deg(self, current: List[float], target: List[float]) -> float:
+        return max(abs(math.degrees(current[i] - target[i])) for i in range(6))
+
+    def _verify_scan_pose_ready(self, label: str) -> None:
+        joints = self.rtde.get_joint_positions()
+        err_deg = self._joint_max_error_deg(joints, config.SCAN_POSE_JOINTS)
+        self._log("ScanPoseCheck {}: max_joint_err_deg={:.2f}".format(label, err_deg))
+        if err_deg > float(config.TRAY_SLOT_SCANPOSE_TOL_DEG):
+            raise RuntimeError(
+                "Robot khong o dung SCAN_POSE truoc khi chup anh: "
+                "label={}, tol={:.2f}deg, actual={:.2f}deg".format(
+                    label,
+                    float(config.TRAY_SLOT_SCANPOSE_TOL_DEG),
+                    err_deg,
+                )
+            )
+
     def _move_joint_runtime(self, joints: List[float], accel: float, vel: float) -> None:
         self.urscript.move_joint_with_settings(
             joints,
@@ -232,6 +250,9 @@ class PickPlaceCycle:
 
     def _run_phase_1_static(self, stage_label: str) -> Dict[str, object]:
         """Phase 1: Motion-only validation through all taught points."""
+        phase1_start_ts = time.time()
+        gripper_close_ms = None
+        gripper_open_ms = None
         try:
             self._set_phase("phase1_initializing")
             self.dashboard.precheck_ready()
@@ -266,6 +287,20 @@ class PickPlaceCycle:
             self._wait_steady_default()
             self._check_abort()
 
+            self._set_phase("phase1_gripper_close")
+            t0 = time.perf_counter()
+            self._gripper_close()
+            gripper_close_ms = (time.perf_counter() - t0) * 1000.0
+            self._log("Phase1 gripper_close_ms={:.1f}".format(gripper_close_ms))
+            self._check_abort()
+
+            self._set_phase("phase1_gripper_open")
+            t0 = time.perf_counter()
+            self._gripper_open()
+            gripper_open_ms = (time.perf_counter() - t0) * 1000.0
+            self._log("Phase1 gripper_open_ms={:.1f}".format(gripper_open_ms))
+            self._check_abort()
+
             self._set_phase("phase1_moving_place_retreat")
             self._move_linear_runtime(config.PLACE_RETREAT_CART, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
             self._wait_steady_default()
@@ -285,6 +320,9 @@ class PickPlaceCycle:
                 "detected_objects": 0,
                 "parts_found": 0,
                 "parts_picked": 0,
+                "cycle_duration_s": round(time.time() - phase1_start_ts, 3),
+                "gripper_close_ms": round(gripper_close_ms, 1) if gripper_close_ms is not None else None,
+                "gripper_open_ms": round(gripper_open_ms, 1) if gripper_open_ms is not None else None,
             }
         except AbortException:
             self._set_phase("aborted")
@@ -298,9 +336,15 @@ class PickPlaceCycle:
 
     def _run_phase_2_motion_vision(self, stage_label: str) -> Dict[str, object]:
         """Phase 2: Full motion + vision + single pick-place."""
+        phase2_start_ts = time.time()
         detected_objects = 0
         approach_pose = None
         final_pose = None
+        p_base = None
+        pick_result = "unknown"
+        confidence = None
+        retries_used = 0
+        selected_slot = ""
 
         try:
             self._ensure_vision_stack()
@@ -329,6 +373,7 @@ class PickPlaceCycle:
             self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
             self._wait_steady_default()
             self._check_abort()
+            self._verify_scan_pose_ready("phase2_capture")
 
             self._set_phase("phase2_vision_detect")
             self.camera.flush_stale_frames(n=config.CAMERA_LAN_WARMUP_FRAMES)
@@ -338,11 +383,13 @@ class PickPlaceCycle:
             detected_objects = len(detections)
             self.job_store.update_job(self.job_id, parts_found=detected_objects)
             self._log("Phase2 detections: {}".format(detected_objects))
+            pick_result = "no_detection"
 
             if detections:
                 frame_center_uv = (config.CAMERA_WIDTH / 2.0, config.CAMERA_HEIGHT / 2.0)
                 target = self.detector.select_best_target(detections, depth, frame_center_uv)
                 if target is None:
+                    pick_result = "no_valid_depth_target"
                     self._log("Co detection nhung select_best_target tra None (tat ca depth khong hop le).")
                     for det in detections:
                         self._log(
@@ -360,6 +407,7 @@ class PickPlaceCycle:
                         )
                 else:
                     target = self.detector.refine_pick_point(rgb, target, depth)
+                    confidence = float(getattr(target, "confidence", 0.0))
                     u, v = target.pick_point
                     depth_mm, depth_bbox = self.detector.resolve_pick_depth(depth, target)
                     self._log(
@@ -375,6 +423,7 @@ class PickPlaceCycle:
                         )
                     )
                     if depth_mm > 0:
+                        pick_result = "target_computed"
                         raw_depth_mm = depth_mm
                         depth_mm, was_clamped, min_safe_depth_mm = sanitize_camera_depth_mm(
                             depth_mm,
@@ -418,10 +467,25 @@ class PickPlaceCycle:
                             self._log("Timestamp sync OK: delta={:.1f}ms".format(ts_diff * 1000.0))
 
                         p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+                        matched_slot, slot_match_meta = resolve_selected_slot_for_target(detections, target)
+                        if matched_slot:
+                            self._log(
+                                "TraySlotMatch: sample={}, selected_slot={}, mean_err_px={}, max_err_px={}, scale={}".format(
+                                    slot_match_meta.get("sample_name", ""),
+                                    matched_slot,
+                                    slot_match_meta.get("best_mean_error_px"),
+                                    slot_match_meta.get("best_max_error_px"),
+                                    slot_match_meta.get("used_scale"),
+                                )
+                            )
+                        else:
+                            self._log("TraySlotMatch: {}".format(slot_match_meta.get("reason", "no_match")))
                         p_base, correction_meta = apply_pick_correction(
                             p_base_raw,
+                            forced_slot=matched_slot,
                             pick_uv=[u, v],
                         )
+                        selected_slot = str(correction_meta.get("selected_slot") or correction_meta.get("forced_slot") or "")
                         self._log(
                             "DepthDebugTarget: {}".format(
                                 json.dumps(
@@ -472,6 +536,7 @@ class PickPlaceCycle:
                         self._log("approach_pose={}".format(approach_pose))
                         self._log("final_pose={}".format(final_pose))
                     else:
+                        pick_result = "invalid_depth_zero"
                         self._log("Depth = 0 tai target bbox, bo qua tinh toa do pick.")
             else:
                 self._log("Khong phat hien object nao. Robot se return home.")
@@ -493,6 +558,12 @@ class PickPlaceCycle:
                     "parts_found": detected_objects,
                     "parts_picked": 0,
                     "target_pose": None,
+                    "confidence": confidence,
+                    "pick_result": pick_result,
+                    "retries_used": retries_used,
+                    "selected_slot": selected_slot,
+                    "target_base": p_base,
+                    "cycle_duration_s": round(time.time() - phase2_start_ts, 3),
                 }
 
             self._set_phase("phase2_moving_pick_approach")
@@ -507,6 +578,7 @@ class PickPlaceCycle:
 
             self._set_phase("phase2_gripping")
             self._gripper_close()
+            pick_result = "success"
 
             self._set_phase("phase2_retreating_after_pick")
             self._move_linear_runtime(approach_pose, accel=config.LINEAR_ACCEL, vel=config.LINEAR_VEL)
@@ -545,6 +617,12 @@ class PickPlaceCycle:
                 "parts_found": detected_objects,
                 "parts_picked": 1,
                 "target_pose": final_pose,
+                "confidence": confidence,
+                "pick_result": pick_result,
+                "retries_used": retries_used,
+                "selected_slot": selected_slot,
+                "target_base": p_base,
+                "cycle_duration_s": round(time.time() - phase2_start_ts, 3),
             }
 
         except AbortException:
@@ -596,6 +674,7 @@ class PickPlaceCycle:
         self._ensure_vision_stack()
 
         try:
+            cycle_start_ts = time.time()
             self._set_phase("initializing")
             self._log("Verifying robot readiness...")
 
@@ -630,6 +709,7 @@ class PickPlaceCycle:
             self._move_joint_runtime(config.SCAN_POSE_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL)
             self._wait_steady_default()
             self._log("At scan position")
+            self._verify_scan_pose_ready("phase3_initial_capture")
 
             _job_logger.start_job(
                 self.job_id,
@@ -644,8 +724,12 @@ class PickPlaceCycle:
             # never tries to pick the same location twice after a successful grip.
             parts_picked = 0
             picked_uvs = []
+            picked_slot_names = []
+            locked_tray_sample_name = ""
+            phase3_pick_records = []
             frame_center_uv = (config.CAMERA_WIDTH / 2.0, config.CAMERA_HEIGHT / 2.0)
             excl_radius_px = float(config.PICKED_EXCLUSION_RADIUS_PX)
+            first_scan_count = None
 
             for pick_cycle in range(config.MAX_PICK_CYCLES):
                 self._check_abort()
@@ -656,6 +740,7 @@ class PickPlaceCycle:
                 # buffer so the next frame reflects the robot's current stationary pose.
                 if config.SCAN_SETTLE_SLEEP_S > 0:
                     time.sleep(config.SCAN_SETTLE_SLEEP_S)
+                self._verify_scan_pose_ready("phase3_cycle_{}".format(pick_cycle + 1))
                 self.camera.flush_stale_frames(n=config.CAMERA_LAN_WARMUP_FRAMES)
                 rgb, depth, cam_ts = self.camera.get_frames_with_timestamp()
                 self.tcp_pose_at_capture, rtde_ts = self.rtde.get_tcp_pose_with_timestamp()
@@ -674,6 +759,7 @@ class PickPlaceCycle:
                 self._log("Detected {} part(s) in tray".format(len(detections)))
                 if pick_cycle == 0:
                     _job_logger.set_first_scan_count(self.job_id, len(detections))
+                    first_scan_count = len(detections)
 
                 if not detections:
                     self._log("Tray empty — cycle complete")
@@ -773,9 +859,51 @@ class PickPlaceCycle:
                     intr["fx"], intr["fy"], intr["cx"], intr["cy"],
                 )
                 p_base_raw = camera_to_base(p_cam, self.tcp_pose_at_capture, config.T_CAM_TO_TCP)
-                p_base, correction_meta = apply_pick_correction(
-                    p_base_raw, pick_uv=[pick_u, pick_v]
+                matched_slot, slot_match_meta = resolve_selected_slot_for_target(
+                    detections,
+                    target,
+                    preferred_sample_name=locked_tray_sample_name,
+                    strict_sample=bool(locked_tray_sample_name),
                 )
+                if not matched_slot and len(detections) == 1:
+                    ref_slots = [slot["name"] for slot in load_tray_slot_reference().get("slots", [])]
+                    remaining_slots = [name for name in ref_slots if name not in picked_slot_names]
+                    if len(remaining_slots) == 1:
+                        matched_slot = remaining_slots[0]
+                        self._log(f"TraySlotMatch: infer_last_remaining_slot={matched_slot}")
+                sample_name = str(slot_match_meta.get("sample_name", "") or "")
+                if not locked_tray_sample_name and len(detections) >= 2 and matched_slot and sample_name:
+                    locked_tray_sample_name = sample_name
+                    self._log(f"TraySlotMatch: lock_sample={locked_tray_sample_name}")
+                if matched_slot:
+                    self._log(
+                        "TraySlotMatch: sample={}, selected_slot={}, mean_err_px={}, max_err_px={}, scale={}, rot_deg={}".format(
+                            sample_name,
+                            matched_slot,
+                            slot_match_meta.get("best_mean_error_px"),
+                            slot_match_meta.get("best_max_error_px"),
+                            slot_match_meta.get("used_scale"),
+                            slot_match_meta.get("rotation_deg"),
+                        )
+                    )
+                    if slot_match_meta.get("override_source"):
+                        self._log(
+                            "TraySlotMatchOverride: source={}, tray_slot={}, final_slot={}, single_sample={}, single_err_px={}".format(
+                                slot_match_meta.get("override_source"),
+                                slot_match_meta.get("tray_slot_name", ""),
+                                matched_slot,
+                                (slot_match_meta.get("single_slot_meta") or {}).get("sample_name", ""),
+                                (slot_match_meta.get("single_slot_meta") or {}).get("error_px"),
+                            )
+                        )
+                else:
+                    self._log("TraySlotMatch: {}".format(slot_match_meta.get("reason", "no_match")))
+                p_base, correction_meta = apply_pick_correction(
+                    p_base_raw,
+                    forced_slot=matched_slot,
+                    pick_uv=[pick_u, pick_v],
+                )
+                selected_slot = str(correction_meta.get("selected_slot") or correction_meta.get("forced_slot") or "")
                 self._log(
                     "PickOffset: raw={}, offset={}, mode={}, final={}".format(
                         [round(float(x), 6) for x in p_base_raw],
@@ -816,6 +944,7 @@ class PickPlaceCycle:
                 # fresh coordinates — do NOT add to picked_uvs so the part is retried.
                 grip_success = False
                 _retries_used = config.MAX_PICK_RETRIES
+                part_start_ts = time.time()
                 for quick_retry in range(config.MAX_PICK_RETRIES):
                     self._check_abort()
                     if quick_retry > 0:
@@ -859,11 +988,23 @@ class PickPlaceCycle:
                             config.MAX_PICK_RETRIES
                         )
                     )
+                    part_duration_s = round(time.time() - part_start_ts, 3)
                     _job_logger.record_pick(
                         self.job_id, pick_cycle + 1,
                         getattr(target, "confidence", 0.0), depth_mm,
                         pick_u, pick_v, _retries_used, False,
                     )
+                    phase3_pick_records.append({
+                        "pick_index": len(phase3_pick_records) + 1,
+                        "cycle_number": pick_cycle + 1,
+                        "tray_position": selected_slot,
+                        "confidence": round(float(getattr(target, "confidence", 0.0)), 4),
+                        "retries_used": _retries_used,
+                        "grip_success": False,
+                        "pick_u": round(float(pick_u), 1),
+                        "pick_v": round(float(pick_v), 1),
+                        "part_duration_s": part_duration_s,
+                    })
                     self._set_phase("retreat_to_scan_c{}".format(pick_cycle))
                     self._move_joint_runtime(
                         config.SCAN_APPROACH_JOINTS, accel=config.JOINT_ACCEL, vel=config.JOINT_VEL
@@ -877,16 +1018,30 @@ class PickPlaceCycle:
 
                 # Grip succeeded: add UV to exclusion list so this slot is ignored next scan.
                 picked_uvs.append((pick_u, pick_v))
+                part_duration_s = round(time.time() - part_start_ts, 3)
                 _job_logger.record_pick(
                     self.job_id, pick_cycle + 1,
                     getattr(target, "confidence", 0.0), depth_mm,
                     pick_u, pick_v, _retries_used, True,
                 )
+                phase3_pick_records.append({
+                    "pick_index": len(phase3_pick_records) + 1,
+                    "cycle_number": pick_cycle + 1,
+                    "tray_position": selected_slot,
+                    "confidence": round(float(getattr(target, "confidence", 0.0)), 4),
+                    "retries_used": _retries_used,
+                    "grip_success": True,
+                    "pick_u": round(float(pick_u), 1),
+                    "pick_v": round(float(pick_v), 1),
+                    "part_duration_s": part_duration_s,
+                })
                 self._log(
                     "Gripped OK — UV ({:.0f},{:.0f}) added to exclusion list, total={}".format(
                         pick_u, pick_v, parts_picked + 1
                     )
                 )
+                if selected_slot:
+                    picked_slot_names.append(selected_slot)
 
                 self._set_phase("retreat_c{}".format(pick_cycle))
                 self._log("Retreating with part...")
@@ -956,8 +1111,10 @@ class PickPlaceCycle:
                 "experiment_stage": 3,
                 "experiment_label": stage_label,
                 "detected_objects": len(picked_uvs),
-                "parts_found": len(picked_uvs),
+                "parts_found": first_scan_count if first_scan_count is not None else len(picked_uvs),
                 "parts_picked": parts_picked,
+                "pick_records": phase3_pick_records,
+                "cycle_duration_s": round(time.time() - cycle_start_ts, 3),
             }
 
         except AbortException as err:

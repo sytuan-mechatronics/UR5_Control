@@ -1,25 +1,17 @@
-"""Manual Phase-3 test tool - multi-shot pick-place up to max parts.
+"""Manual Phase-1 test tool - basic UR5 motion + gripper response.
 
-Expected flow:
-  HOME -> SCAN_APPROACH -> SCAN_POSE
-  LOOP until no parts detected (up to --max-parts):
-    capture -> detect -> pick -> place -> return to SCAN_POSE
-  HOME -> done
-
-Run --preflight first to validate model/camera/ports without moving robot.
+Run --preflight first to validate robot ports and gripper serial without
+executing the full motion cycle.
 """
 
 import argparse
 import json
-import os
 import socket
 import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
-
-import numpy as np
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,7 +25,6 @@ from core.pneumatic_gripper import PneumaticGripper
 from robot.dashboard_client import DashboardClient
 from robot.rtde_client import RTDEClient
 from robot.urscript_client import URScriptClient
-from vision.detector import Detector
 
 
 def check_tcp_port(host: str, port: int, timeout_s: float = 1.0) -> bool:
@@ -45,30 +36,7 @@ def check_tcp_port(host: str, port: int, timeout_s: float = 1.0) -> bool:
 
 
 def run_preflight(robot_ip: str) -> int:
-    print("\n=== PREFLIGHT PHASE 3 ===")
-
-    model_path = config.YOLO_MODEL_PATH
-    model_exists = os.path.isfile(model_path)
-    print(f"YOLO_MODEL_PATH: {model_path}")
-    print(f"Model exists: {model_exists}")
-    if not model_exists:
-        print("Loi: khong tim thay model. Dung lai preflight.")
-        return 1
-
-    try:
-        detector = Detector(
-            model_path=model_path,
-            confidence=config.YOLO_CONFIDENCE,
-            target_class=config.YOLO_TARGET_CLASS,
-        )
-        img = np.zeros((640, 640, 3), dtype=np.uint8)
-        detections = detector.detect(img)
-        print("Detector load: OK")
-        print(f"Detector infer test: OK (detections={len(detections)})")
-    except Exception as exc:
-        print(f"Detector load/infer FAIL: {exc}")
-        return 1
-
+    print("\n=== PREFLIGHT PHASE 1 ===")
     robot_ports = [
         ("Dashboard", config.DASHBOARD_PORT),
         ("URScript", config.URSCRIPT_PORT),
@@ -78,24 +46,31 @@ def run_preflight(robot_ip: str) -> int:
         ok = check_tcp_port(robot_ip, port)
         print(f"{name} port {port}: {'OK' if ok else 'FAIL'}")
         if not ok:
-            print(f"Loi: khong ket noi duoc {name} port {port}. Kiem tra robot IP va trang thai nguon.")
+            print(f"Loi: khong ket noi duoc {name} port {port}.")
             return 1
 
+    gripper = PneumaticGripper(
+        port=config.GRIPPER_PORT,
+        baud=config.GRIPPER_BAUD,
+        cmd_timeout_s=config.GRIPPER_CMD_TIMEOUT_S,
+        grip_settle_s=config.GRIPPER_SETTLE_S,
+        release_settle_s=config.GRIPPER_RELEASE_SETTLE_S,
+        heartbeat_interval_s=config.GRIPPER_HEARTBEAT_S,
+    )
     try:
-        from vision.femto_camera import FemtoCamera
-
-        camera = FemtoCamera(width=config.CAMERA_WIDTH, height=config.CAMERA_HEIGHT)
-        camera.connect()
-        try:
-            rgb, depth, _ = camera.get_frames_with_timestamp()
-            print(f"Camera stream: OK (rgb={rgb.shape}, depth={depth.shape})")
-        finally:
-            camera.disconnect()
+        gripper.connect()
+        state = gripper.get_state()
+        print(f"Gripper serial: OK (state={state})")
     except Exception as exc:
-        print(f"Camera stream: FAIL ({exc})")
+        print(f"Gripper serial: FAIL ({exc})")
         return 1
+    finally:
+        try:
+            gripper.disconnect()
+        except Exception:
+            pass
 
-    print("Preflight thanh cong. Co the chay test Phase 3 that.")
+    print("Preflight thanh cong. Co the chay test Phase 1 that.")
     return 0
 
 
@@ -104,25 +79,23 @@ def confirm(message: str, force: bool) -> None:
         return
     answer = input(f"\n[XAC NHAN] {message}\nTiep tuc? [y/N]: ").strip().lower()
     if answer not in ("y", "yes"):
-        print("Da huy test Phase 3.")
+        print("Da huy test Phase 1.")
         raise SystemExit(0)
 
 
 def print_summary(job_snapshot: dict, result: Optional[dict]) -> None:
-    print("\n=== KET QUA PHASE 3 ===")
+    print("\n=== KET QUA PHASE 1 ===")
     if result is not None:
         print(f"status: {result.get('status')}")
         print(f"stage: {result.get('stage')}")
-        print(f"detected_objects: {result.get('detected_objects')}")
-        print(f"parts_found: {result.get('parts_found')}")
-        print(f"parts_picked: {result.get('parts_picked')}")
+        print(f"cycle_duration_s: {result.get('cycle_duration_s')}")
+        print(f"gripper_close_ms: {result.get('gripper_close_ms')}")
+        print(f"gripper_open_ms: {result.get('gripper_open_ms')}")
 
     print("\n=== JOB SNAPSHOT ===")
     print(f"job_id: {job_snapshot.get('job_id')}")
     print(f"status: {job_snapshot.get('status')}")
     print(f"phase: {job_snapshot.get('phase')}")
-    print(f"parts_found: {job_snapshot.get('parts_found')}")
-    print(f"parts_picked: {job_snapshot.get('parts_picked')}")
     if job_snapshot.get("error"):
         print(f"error: {job_snapshot.get('error')}")
 
@@ -137,39 +110,32 @@ def print_logs(job_snapshot: dict, tail: int) -> None:
         print(line)
 
 
-def print_scenario_report(path: str, rows: List[Dict]) -> None:
-    print("\n=== LOG KICH BAN 3 ===")
+def print_scenario_report(path: str, row: dict) -> None:
+    print("\n=== LOG KICH BAN 1 ===")
     print(f"path: {path}")
-    print(f"rows_written: {len(rows)}")
-    for row in rows:
-        print(json.dumps(row, ensure_ascii=True))
+    print(json.dumps(row, ensure_ascii=True, indent=2))
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test Phase 3 manual")
+    parser = argparse.ArgumentParser(description="Test Phase 1 manual")
     parser.add_argument("--robot-ip", default=config.ROBOT_IP, help="Robot IP")
-    parser.add_argument("--station", default="phase3_manual_test", help="Station name")
+    parser.add_argument("--station", default="phase1_manual_test", help="Station name")
     parser.add_argument(
         "--workflow-id",
-        default=f"manual-phase3-{int(time.time())}",
+        default=f"manual-phase1-{int(time.time())}",
         help="Workflow ID",
     )
     parser.add_argument("--yes", action="store_true", help="Skip safety confirmation")
-    parser.add_argument("--log-tail", type=int, default=60, help="Tail lines to print")
+    parser.add_argument("--log-tail", type=int, default=40, help="Tail lines to print")
     parser.add_argument("--preflight", action="store_true", help="Run preflight only")
-    parser.add_argument("--max-parts", type=int, default=5, help="Expected max parts for validation")
-    parser.add_argument("--scenario-case", default="", help="Ma truong hop con, vd: 3a/3b/3c/3d")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-
-    print("=== Phase 3 Manual Test ===")
+    print("=== Phase 1 Manual Test ===")
     print(f"Robot IP: {args.robot_ip}")
-    print(f"Mode: full flow multi-shot (expected up to {args.max_parts} parts)")
-    if args.scenario_case:
-        print(f"Scenario case: {args.scenario_case}")
+    print("Mode: basic UR5 motion + gripper response")
 
     if args.preflight:
         return run_preflight(args.robot_ip)
@@ -196,10 +162,10 @@ def main() -> int:
     job = job_store.create_job(
         station=args.station,
         workflow_id=args.workflow_id,
-        experiment_stage=3,
+        experiment_stage=1,
     )
     job_id = job["job_id"]
-    print(f"\nDa tao job: {job_id} (experiment_stage=3)")
+    print(f"\nDa tao job: {job_id} (experiment_stage=1)")
 
     result = None
     exit_code = 0
@@ -222,10 +188,10 @@ def main() -> int:
 
     except AbortException:
         exit_code = 130
-        print("\nPhase 3 ABORTED by user.")
+        print("\nPhase 1 ABORTED by user.")
     except Exception as exc:
         exit_code = 1
-        print(f"\nPhase 3 THAT BAI: {exc}")
+        print(f"\nPhase 1 THAT BAI: {exc}")
         traceback.print_exc()
     finally:
         for client, name in [
@@ -241,25 +207,19 @@ def main() -> int:
 
     job_snapshot = job_store.get_job(job_id) or {}
     report_path = None
-    report_rows = None
+    report_row = None
     try:
-        report_path, report_rows = experiment_report_logger.write_scenario3(
-            job_snapshot,
-            result or {},
-            scenario_case=args.scenario_case,
-        )
+        report_path, report_row = experiment_report_logger.write_scenario1(job_snapshot, result or {})
     except Exception as err:
-        print(f"Warning: ghi log kich ban 3 that bai: {err}")
+        print(f"Warning: ghi log kich ban 1 that bai: {err}")
+
     print_summary(job_snapshot, result)
     print_logs(job_snapshot, max(1, args.log_tail))
-    if report_path and report_rows:
-        print_scenario_report(report_path, report_rows)
-
-    picked = int((result or {}).get("parts_picked") or 0)
-    print(f"\nPicked summary: {picked}/{args.max_parts} (max expected)")
+    if report_path and report_row:
+        print_scenario_report(report_path, report_row)
 
     if exit_code == 0:
-        print("\nPhase 3 test HOAN TAT.")
+        print("\nPhase 1 test HOAN TAT.")
     return exit_code
 
 
