@@ -1,9 +1,9 @@
-"""Standalone test: from SCAN_POSE, detect part, touch part, return SCAN_POSE.
+"""Standalone test: auto move to SCAN_POSE, detect part, touch part, return SCAN_POSE.
 
 Expected operator flow:
-1) Manually park robot at SCAN_POSE first.
-2) Run this script.
-3) Script captures image immediately, computes pick point, touches part,
+1) Run this script.
+2) Script automatically moves robot to HOME -> SCAN_APPROACH -> SCAN_POSE.
+3) Script captures image, computes pick point, touches part,
    then returns to SCAN_POSE and exits.
 """
 
@@ -31,12 +31,15 @@ from vision.calibration import (
     clamp_pick_z_sequence,
     camera_origin_to_base,
     camera_to_base,
+    normalize_slot_name,
     pixel_to_camera_3d,
     resolve_intrinsics_for_frame,
     sanitize_camera_depth_mm,
 )
 from vision.detector import Detector
 from vision.femto_camera import FemtoCamera
+from vision.single_slot_reference import load_single_slot_reference
+from vision.tray_slot_reference import load_tray_slot_reference, resolve_selected_slot_for_target
 
 
 WINDOW_PREVIEW = "SCANPOSE TOUCH PREVIEW"
@@ -44,12 +47,23 @@ WINDOW_PREVIEW = "SCANPOSE TOUCH PREVIEW"
 
 def print_runtime_snapshot() -> None:
     correction_map = _load_pick_correction_map()
+    tray_ref = load_tray_slot_reference()
+    single_slot_ref = load_single_slot_reference()
     print(f"Runtime repo root: {ROOT}")
     print(f"Runtime config file: {Path(config.__file__).resolve()}")
     print(f"PICK_CORRECTION_ENABLED: {config.PICK_CORRECTION_ENABLED}")
     print(f"PICK_CORRECTION_MAP_PATH: {config.PICK_CORRECTION_MAP_PATH}")
     print(f"PICK_CORRECTION_POINTS: {len(correction_map.get('points', []))}")
     print(f"PICK_CORRECTION_STATUS: {correction_map.get('reason', 'unknown')}")
+    print(f"TRAY_SLOT_REFERENCE_ENABLED: {config.TRAY_SLOT_REFERENCE_ENABLED}")
+    print(f"TRAY_SLOT_REFERENCE_PATH: {config.TRAY_SLOT_REFERENCE_PATH}")
+    print(f"TRAY_SLOT_REFERENCE_SAMPLES: {len(tray_ref.get('samples', []))}")
+    print(f"TRAY_SLOT_REFERENCE_SLOTS_IN_FIRST_SAMPLE: {len(tray_ref.get('slots', []))}")
+    print(f"TRAY_SLOT_REFERENCE_STATUS: {tray_ref.get('reason', 'unknown')}")
+    print(f"SINGLE_SLOT_REFERENCE_ENABLED: {config.SINGLE_SLOT_REFERENCE_ENABLED}")
+    print(f"SINGLE_SLOT_REFERENCE_PATH: {config.SINGLE_SLOT_REFERENCE_PATH}")
+    print(f"SINGLE_SLOT_REFERENCE_SAMPLES: {len(single_slot_ref.get('samples', []))}")
+    print(f"SINGLE_SLOT_REFERENCE_STATUS: {single_slot_ref.get('reason', 'unknown')}")
     print(
         "GLOBAL_PICK_OFFSET: "
         f"{[round(float(config.PICK_OFFSET_X), 4), round(float(config.PICK_OFFSET_Y), 4), round(float(config.PICK_OFFSET_Z), 4)]}"
@@ -79,6 +93,50 @@ def wait_steady(rtde: RTDEClient, label: str) -> bool:
     if not ok:
         print(f"Canh bao: timeout khi cho robot dung tai buoc {label}.")
     return ok
+
+
+def move_robot_to_scan_pose(rtde: RTDEClient, urscript: URScriptClient) -> None:
+    """Move robot to the taught scan pose using the same safe sequence as runtime flow."""
+    print("Dang dua robot ve HOME...")
+    urscript.move_joint(
+        config.HOME_JOINTS,
+        accel=config.JOINT_ACCEL,
+        vel=config.JOINT_VEL,
+    )
+    wait_steady(rtde, "move_home")
+
+    print("Dang dua robot den SCAN_APPROACH...")
+    urscript.move_joint(
+        config.SCAN_APPROACH_JOINTS,
+        accel=config.JOINT_ACCEL,
+        vel=config.JOINT_VEL,
+    )
+    wait_steady(rtde, "move_scan_approach")
+
+    print("Dang dua robot den SCAN_POSE...")
+    urscript.move_joint(
+        config.SCAN_POSE_JOINTS,
+        accel=config.JOINT_ACCEL,
+        vel=config.JOINT_VEL,
+    )
+    wait_steady(rtde, "move_scan_pose")
+
+
+def ensure_robot_at_scan_pose(
+    rtde: RTDEClient,
+    urscript: URScriptClient,
+    scanpose_tol_deg: float,
+) -> None:
+    """Skip motion when robot is already at SCAN_POSE, else move there automatically."""
+    current_j = rtde.get_joint_positions()
+    err_deg = joint_max_error_deg(current_j, config.SCAN_POSE_JOINTS)
+    print(f"Lech SCAN_POSE truoc khi auto move (max joint error): {err_deg:.2f} deg")
+    if err_deg <= scanpose_tol_deg:
+        print("Robot da o SCAN_POSE trong tolerance. Bo qua auto move.")
+        return
+
+    print("Robot chua o SCAN_POSE. Bat dau auto move ve SCAN_POSE...")
+    move_robot_to_scan_pose(rtde, urscript)
 
 
 def joint_max_error_deg(current, target) -> float:
@@ -363,10 +421,10 @@ def main() -> int:
 
     print("=== SCANPOSE TOUCH TEST ===")
     print(f"Robot IP: {args.robot_ip}")
-    print("Flow: scanpose -> vision -> touch -> return scanpose -> stop")
+    print("Flow: auto move scanpose -> vision -> touch -> return scanpose -> stop")
     print(f"Touch mode: {args.touch_mode}")
     if args.force_slot:
-        print(f"Force slot: {args.force_slot}")
+        print(f"Force slot: {normalize_slot_name(args.force_slot)}")
     print_runtime_snapshot()
     motion_start_timeout = (
         args.motion_start_timeout
@@ -382,7 +440,7 @@ def main() -> int:
     skip_set_payload = args.skip_set_payload or config.SKIP_SET_PAYLOAD
 
     confirm(
-        "Robot da dung san o SCAN_POSE, workspace clear, san sang test cham phoi",
+        "Workspace clear, robot san sang tu dong di ve SCAN_POSE roi test cham phoi",
         args.yes,
     )
 
@@ -405,19 +463,6 @@ def main() -> int:
         urscript.connect()
         camera.connect()
 
-        # Inform operator if robot is far from taught SCAN_POSE.
-        current_j = rtde.get_joint_positions()
-        err_deg = joint_max_error_deg(current_j, config.SCAN_POSE_JOINTS)
-        print(f"Lech SCAN_POSE hien tai (max joint error): {err_deg:.2f} deg")
-        if err_deg > args.scanpose_tol_deg:
-            print(
-                "Loi: robot chua dung dung SCAN_POSE. "
-                f"Tolerance={args.scanpose_tol_deg:.2f} deg, actual={err_deg:.2f} deg."
-            )
-            print("Hay dua robot ve SCAN_POSE roi chay lai tool.")
-            return 1
-        print("Xac nhan vi tri SCAN_POSE: OK")
-        print(f"SCAN_POSE TCP in config: {[round(v, 4) for v in config.SCAN_POSE_TCP]}")
         if not skip_set_tcp:
             urscript.set_tcp(config.TCP_OFFSET)
             print("set_tcp applied")
@@ -431,6 +476,26 @@ def main() -> int:
             )
         else:
             print("SKIP_SET_PAYLOAD: bo qua set_payload()")
+
+        ensure_robot_at_scan_pose(
+            rtde,
+            urscript,
+            scanpose_tol_deg=args.scanpose_tol_deg,
+        )
+
+        # Verify robot really reached the taught SCAN_POSE before starting vision.
+        current_j = rtde.get_joint_positions()
+        err_deg = joint_max_error_deg(current_j, config.SCAN_POSE_JOINTS)
+        print(f"Lech SCAN_POSE truoc khi chup anh (max joint error): {err_deg:.2f} deg")
+        if err_deg > args.scanpose_tol_deg:
+            print(
+                "Loi: robot khong o dung SCAN_POSE truoc khi chup anh. "
+                f"Tolerance={args.scanpose_tol_deg:.2f} deg, actual={err_deg:.2f} deg."
+            )
+            print("Kiem tra lai taught pose, TCP/payload, hoac trang thai co khi roi chay lai tool.")
+            return 1
+        print("Xac nhan vi tri SCAN_POSE truoc khi chup anh: OK")
+        print(f"SCAN_POSE TCP in config: {[round(v, 4) for v in config.SCAN_POSE_TCP]}")
 
         rgb, depth, cam_ts = capture_valid_frames(camera)
         # Read TCP immediately after capture to minimize frame/pose time skew.
@@ -547,9 +612,10 @@ def main() -> int:
             cy_eff,
         )
         p_base_raw = camera_to_base(p_cam, tcp_pose_at_capture, config.T_CAM_TO_TCP)
+        matched_slot, slot_match_meta = resolve_selected_slot_for_target(detections, target)
         p_base, correction_meta = apply_pick_correction(
             p_base_raw,
-            forced_slot=args.force_slot,
+            forced_slot=normalize_slot_name(args.force_slot) or matched_slot,
             pick_uv=[u, v],
         )
         print(
@@ -562,6 +628,32 @@ def main() -> int:
             f"pick_correction_local(m)={ [round(vv, 4) for vv in correction_meta.get('local_offset', [0.0, 0.0, 0.0])] } "
             f"mode={correction_meta.get('mode', 'unknown')}"
         )
+        if matched_slot:
+            print(
+                "tray_slot_match="
+                f"{matched_slot} sample={slot_match_meta.get('sample_name', '')} "
+                f"mean_err_px={slot_match_meta.get('best_mean_error_px')} "
+                f"max_err_px={slot_match_meta.get('best_max_error_px')} "
+                f"scale={slot_match_meta.get('used_scale')} rot_deg={slot_match_meta.get('rotation_deg')}"
+            )
+            if slot_match_meta.get("second_best_slot"):
+                print(
+                    "tray_slot_match_second_best="
+                    f"{slot_match_meta.get('second_best_slot')} "
+                    f"err_px={slot_match_meta.get('second_best_error_px')}"
+                )
+        else:
+            print(f"tray_slot_match={slot_match_meta.get('reason', 'no_match')}")
+        if slot_match_meta.get("override_source"):
+            single_meta = slot_match_meta.get("single_slot_meta") or {}
+            print(
+                "tray_slot_match_override="
+                f"source={slot_match_meta.get('override_source')} "
+                f"tray_slot={slot_match_meta.get('tray_slot_name', '')} "
+                f"final_slot={matched_slot} "
+                f"single_sample={single_meta.get('sample_name', '')} "
+                f"single_err_px={single_meta.get('error_px')}"
+            )
         if correction_meta.get("selected_slot"):
             print(f"selected_slot={correction_meta.get('selected_slot')}")
         elif correction_meta.get("forced_slot"):

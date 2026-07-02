@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from core.experiment_report_logger import experiment_report_logger
 from core.job_store import JobStore
 from core.pick_place import PickPlaceCycle, AbortException
 from core.pneumatic_gripper import PneumaticGripper
@@ -135,6 +136,12 @@ def print_logs(job_snapshot: dict, tail: int) -> None:
         print(line)
 
 
+def print_scenario_report(path: str, row: dict) -> None:
+    print("\n=== LOG KICH BAN 2 ===")
+    print(f"path: {path}")
+    print(json.dumps(row, ensure_ascii=True, indent=2))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test Phase 2 manual")
     parser.add_argument("--robot-ip", default=config.ROBOT_IP, help="Robot IP")
@@ -226,8 +233,16 @@ def main() -> int:
                 print(f"Warning: {name} disconnect: {err}")
 
     job_snapshot = job_store.get_job(job_id) or {}
+    report_path = None
+    report_row = None
+    try:
+        report_path, report_row = experiment_report_logger.write_scenario2(job_snapshot, result or {})
+    except Exception as err:
+        print(f"Warning: ghi log kich ban 2 that bai: {err}")
     print_summary(job_snapshot, result)
     print_logs(job_snapshot, max(1, args.log_tail))
+    if report_path and report_row:
+        print_scenario_report(report_path, report_row)
 
     if exit_code == 0:
         print("\nPhase 2 test HOAN TAT.")

@@ -1,0 +1,9 @@
+﻿job_id,created_at,completed_at,duration_s,station,workflow_id,experiment_stage,ur5_joint_speed_rad_s,ur5_linear_speed_m_s,ur5_pick_approach_speed_m_s,cycle_status,cycle_time_s,gripper_close_ms,gripper_open_ms,warning_count,error_or_warning,note
+60cc417b,2026-06-26T06:54:59Z,2026-06-26T06:55:59Z,59.584,phase1_manual_test,manual-phase1-1782456897,1,0.8,0.1,0.05,done,57.341,511.7,314.4,0,,
+584d8434,2026-06-26T06:57:16Z,2026-06-26T06:58:16Z,59.995,phase1_manual_test,manual-phase1-1782457032,1,0.8,0.1,0.05,done,57.459,511.6,314.6,0,,
+20e63565,2026-06-26T07:52:19Z,2026-06-26T07:52:57Z,38.073,phase1_manual_test,manual-phase1-1782460329,1,0.8,0.1,0.05,done,35.768,511.6,314.5,0,,
+32b9cc70,2026-06-26T07:53:14Z,2026-06-26T07:53:52Z,37.874,phase1_manual_test,manual-phase1-1782460389,1,0.8,0.1,0.05,done,35.574,511.5,314.5,0,,
+7d35ab65,2026-06-26T07:54:07Z,2026-06-26T07:54:46Z,38.981,phase1_manual_test,manual-phase1-1782460445,1,0.8,0.1,0.05,done,36.531,511.2,314.4,0,,
+f2ca8dea,2026-06-26T07:54:57Z,2026-06-26T07:55:36Z,39.051,phase1_manual_test,manual-phase1-1782460496,1,0.8,0.1,0.05,done,36.422,511.3,314.4,0,,
+f8cd4b56,2026-06-26T08:37:13Z,2026-06-26T08:37:50Z,37.682,phase1_manual_test,manual-phase1-1782463031,1,0.8,0.1,0.05,done,35.476,511.6,314.5,0,,
+32ea0c5d,2026-06-26T08:38:12Z,2026-06-26T08:38:51Z,39.218,phase1_manual_test,manual-phase1-1782463078,1,0.8,0.1,0.05,done,37.015,511.5,314.5,0,,

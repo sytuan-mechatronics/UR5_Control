@@ -20,6 +20,16 @@ _PICK_CORRECTION_CACHE = {
 }
 
 
+def normalize_slot_name(name: str) -> str:
+    """Normalize slot aliases like slot4 -> slot_4."""
+    text = str(name or "").strip().lower()
+    if not text:
+        return ""
+    if text.startswith("slot") and len(text) > 4 and text[4:].isdigit():
+        return f"slot_{text[4:]}"
+    return text
+
+
 def _pick_correction_file() -> Path:
     raw_path = str(getattr(config, "PICK_CORRECTION_MAP_PATH", "pick_correction_map.json")).strip()
     path = Path(raw_path)
@@ -54,7 +64,7 @@ def _load_pick_correction_map() -> Dict:
         try:
             parsed_points.append(
                 {
-                    "name": str(point.get("name", f"P{idx}")),
+                    "name": normalize_slot_name(point.get("name", f"P{idx}")),
                     "x": float(point["x"]),
                     "y": float(point["y"]),
                     "dx": float(point.get("dx", 0.0)),
@@ -99,7 +109,7 @@ def compute_pick_correction_offset(
         "mode": "global_only",
         "path": "",
         "point_count": 0,
-        "forced_slot": forced_slot or "",
+        "forced_slot": normalize_slot_name(forced_slot or ""),
         "pick_uv": [float(pick_uv[0]), float(pick_uv[1])] if pick_uv is not None else [],
         "local_offset": [0.0, 0.0, 0.0],
         "global_offset": global_offset,
@@ -136,7 +146,7 @@ def compute_pick_correction_offset(
 
     scored.sort(key=lambda item: item[0])
 
-    forced_slot = (forced_slot or "").strip()
+    forced_slot = normalize_slot_name(forced_slot)
     if forced_slot:
         forced_point = next((point for point in points if point["name"] == forced_slot), None)
         if forced_point is None:

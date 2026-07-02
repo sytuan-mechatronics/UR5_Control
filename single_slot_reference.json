@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "sample_count": 15,
+    "format_version": 1,
+    "source": "register_single_slot_reference"
+  },
+  "samples": [
+    {
+      "name": "slot1_a",
+      "slot_name": "slot_1",
+      "u": 943.0,
+      "v": 893.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_1_20260626_113249.jpg",
+      "scan_pose_joints": [
+        -0.093736,
+        -1.589548,
+        -1.398226,
+        -1.480259,
+        1.575723,
+        9.6e-05
+      ],
+      "scan_pose_tcp": [
+        0.560951,
+        -0.165517,
+        0.210473,
+        2.152388,
+        1.97943,
+        0.236933
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot1_b",
+      "slot_name": "slot_1",
+      "u": 929.0,
+      "v": 886.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_1_20260626_113350.jpg",
+      "scan_pose_joints": [
+        -0.093736,
+        -1.589548,
+        -1.398202,
+        -1.4802,
+        1.575795,
+        9.6e-05
+      ],
+      "scan_pose_tcp": [
+        0.560982,
+        -0.165491,
+        0.210497,
+        2.15236,
+        1.979421,
+        0.237092
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot1_c",
+      "slot_name": "slot_1",
+      "u": 898.0,
+      "v": 886.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_1_20260626_113424.jpg",
+      "scan_pose_joints": [
+        -0.093725,
+        -1.589548,
+        -1.398215,
+        -1.480212,
+        1.575771,
+        7.2e-05
+      ],
+      "scan_pose_tcp": [
+        0.560975,
+        -0.165493,
+        0.210488,
+        2.152331,
+        1.97946,
+        0.237041
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot1_d",
+      "slot_name": "slot_1",
+      "u": 944.0,
+      "v": 800.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_1_20260626_113504.jpg",
+      "scan_pose_joints": [
+        -0.093712,
+        -1.589512,
+        -1.398215,
+        -1.480188,
+        1.575759,
+        7.2e-05
+      ],
+      "scan_pose_tcp": [
+        0.560981,
+        -0.165491,
+        0.210513,
+        2.15228,
+        1.979435,
+        0.237085
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot2_a",
+      "slot_name": "slot_2",
+      "u": 938.0,
+      "v": 547.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_2_20260626_113548.jpg",
+      "scan_pose_joints": [
+        -0.093772,
+        -1.589536,
+        -1.398202,
+        -1.480212,
+        1.575806,
+        8.4e-05
+      ],
+      "scan_pose_tcp": [
+        0.560971,
+        -0.165506,
+        0.210501,
+        2.152385,
+        1.979399,
+        0.237098
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot2_b",
+      "slot_name": "slot_2",
+      "u": 928.0,
+      "v": 555.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_2_20260626_113646.jpg",
+      "scan_pose_joints": [
+        -0.093736,
+        -1.589536,
+        -1.398202,
+        -1.480223,
+        1.575783,
+        8.4e-05
+      ],
+      "scan_pose_tcp": [
+        0.560972,
+        -0.165495,
+        0.210499,
+        2.152351,
+        1.979434,
+        0.237066
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot2_c",
+      "slot_name": "slot_2",
+      "u": 928.0,
+      "v": 564.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_2_20260626_113713.jpg",
+      "scan_pose_joints": [
+        -0.093748,
+        -1.589536,
+        -1.398202,
+        -1.480175,
+        1.575783,
+        6e-05
+      ],
+      "scan_pose_tcp": [
+        0.560987,
+        -0.165503,
+        0.210508,
+        2.152308,
+        1.979418,
+        0.237106
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot2_a",
+      "slot_name": "slot_2",
+      "u": 868.0,
+      "v": 544.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_2_20260626_113758.jpg",
+      "scan_pose_joints": [
+        -0.093712,
+        -1.589548,
+        -1.398226,
+        -1.480223,
+        1.575771,
+        7.2e-05
+      ],
+      "scan_pose_tcp": [
+        0.560969,
+        -0.165486,
+        0.210479,
+        2.152333,
+        1.979487,
+        0.237021
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot2_d",
+      "slot_name": "slot_2",
+      "u": 927.0,
+      "v": 540.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_2_20260626_113851.jpg",
+      "scan_pose_joints": [
+        -0.093736,
+        -1.589536,
+        -1.398215,
+        -1.480212,
+        1.575795,
+        7.2e-05
+      ],
+      "scan_pose_tcp": [
+        0.560973,
+        -0.16549,
+        0.210494,
+        2.152343,
+        1.979453,
+        0.237077
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot3_a",
+      "slot_name": "slot_3",
+      "u": 647.0,
+      "v": 717.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_3_20260626_113922.jpg",
+      "scan_pose_joints": [
+        -0.093736,
+        -1.589512,
+        -1.398202,
+        -1.480163,
+        1.575819,
+        0.000108
+      ],
+      "scan_pose_tcp": [
+        0.560992,
+        -0.165482,
+        0.210524,
+        2.152337,
+        1.979381,
+        0.237188
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot4_a",
+      "slot_name": "slot_4",
+      "u": 389.0,
+      "v": 544.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot4_20260626_114003.jpg",
+      "scan_pose_joints": [
+        -0.093712,
+        -1.589512,
+        -1.398215,
+        -1.4802,
+        1.575783,
+        7.2e-05
+      ],
+      "scan_pose_tcp": [
+        0.560978,
+        -0.165482,
+        0.21051,
+        2.152295,
+        1.979453,
+        0.237101
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot5_a",
+      "slot_name": "slot_5",
+      "u": 355.0,
+      "v": 909.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_5_20260626_114040.jpg",
+      "scan_pose_joints": [
+        -0.093725,
+        -1.589536,
+        -1.398238,
+        -1.480212,
+        1.575842,
+        6e-05
+      ],
+      "scan_pose_tcp": [
+        0.560969,
+        -0.165464,
+        0.210481,
+        2.152348,
+        1.979516,
+        0.23711
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot5_b",
+      "slot_name": "slot_5",
+      "u": 353.0,
+      "v": 845.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_5_20260626_114135.jpg",
+      "scan_pose_joints": [
+        -0.093748,
+        -1.589536,
+        -1.398215,
+        -1.4802,
+        1.575783,
+        8.4e-05
+      ],
+      "scan_pose_tcp": [
+        0.560975,
+        -0.165502,
+        0.210496,
+        2.152355,
+        1.979414,
+        0.237075
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot4_b",
+      "slot_name": "slot_4",
+      "u": 414.0,
+      "v": 517.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_4_20260626_114229.jpg",
+      "scan_pose_joints": [
+        -0.093784,
+        -1.589524,
+        -1.398226,
+        -1.480188,
+        1.575783,
+        4.8e-05
+      ],
+      "scan_pose_tcp": [
+        0.560968,
+        -0.165522,
+        0.210499,
+        2.152344,
+        1.979404,
+        0.237076
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    },
+    {
+      "name": "slot3_b",
+      "slot_name": "slot_3",
+      "u": 665.0,
+      "v": 688.0,
+      "image_path": "/home/tuan/Downloads/Ur5_Control-main/captures/single_slot_reference/slot_3_20260626_114303.jpg",
+      "scan_pose_joints": [
+        -0.093784,
+        -1.589524,
+        -1.39819,
+        -1.480175,
+        1.575806,
+        0.00012
+      ],
+      "scan_pose_tcp": [
+        0.56098,
+        -0.16551,
+        0.210499,
+        2.152363,
+        1.979365,
+        0.237051
+      ],
+      "meta": {
+        "source": "register_single_slot_reference"
+      }
+    }
+  ]
+}
